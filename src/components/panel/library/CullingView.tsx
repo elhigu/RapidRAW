@@ -24,6 +24,7 @@ import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
+import { isCullingPreviewPending, loadCullingPreview } from '../../../utils/cullingPreview';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useLibraryActions } from '../../../hooks/useLibraryActions';
@@ -249,55 +250,18 @@ function CullingPreview({
     setIsLoading(true);
     setHighResSrc(null);
 
-    const fetchPreviewWithAdjustments = async () => {
-      try {
-        const metadata: any = await invoke(Invokes.LoadMetadata, { path: image.path });
-        if (!active) return;
-
-        const adjustments =
-          metadata && metadata.adjustments && !metadata.adjustments.is_null ? metadata.adjustments : {};
-
-        const bytes = await invoke<Uint8Array>(Invokes.GeneratePreviewForPath, {
-          path: image.path,
-          jsAdjustments: adjustments,
-        });
-        if (!active) return;
-
-        const blob = new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' });
-        const localBlobUrl = URL.createObjectURL(blob);
-
-        setPreview(image.path, localBlobUrl, safeThumbKey);
-
-        if (active) {
-          setHighResSrc(localBlobUrl);
-          setIsLoading(false);
-        }
-      } catch (err) {
-        console.error('Error loading culling preview with adjustments:', err);
-
-        if (active) {
-          try {
-            const fallbackBytes = await invoke<Uint8Array>(Invokes.GeneratePreviewForPath, {
-              path: image.path,
-              jsAdjustments: {},
-            });
-            if (!active) return;
-            const blob = new Blob([new Uint8Array(fallbackBytes)], { type: 'image/jpeg' });
-            const localBlobUrl = URL.createObjectURL(blob);
-
-            setPreview(image.path, localBlobUrl, safeThumbKey);
-            setHighResSrc(localBlobUrl);
-          } catch (fallbackErr) {
-            console.error('Fallback preview generation also failed:', fallbackErr);
-          }
-          setIsLoading(false);
-        }
-      }
-    };
-
+    // A preview that is already being rendered (preloaded) is joined right away.
+    const delay = isCullingPreviewPending(image.path, safeThumbKey) ? 0 : 200;
     const delayTimeout = setTimeout(() => {
-      fetchPreviewWithAdjustments();
-    }, 200);
+      loadCullingPreview(image.path, safeThumbKey)
+        .then((url) => {
+          if (active) setHighResSrc(url);
+        })
+        .catch((err) => console.error('Fallback preview generation also failed:', err))
+        .finally(() => {
+          if (active) setIsLoading(false);
+        });
+    }, delay);
 
     return () => {
       active = false;
