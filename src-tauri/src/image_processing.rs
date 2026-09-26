@@ -2624,6 +2624,7 @@ pub struct GpuContext {
     pub limits: wgpu::Limits,
     pub adapter_info: wgpu::AdapterInfo,
     pub display: Arc<std::sync::Mutex<Option<WgpuDisplay>>>,
+    pub pipelines: Arc<std::sync::OnceLock<Arc<crate::gpu_processing::GpuPipelines>>>,
 }
 
 #[inline(always)]

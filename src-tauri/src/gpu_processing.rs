@@ -438,6 +438,7 @@ pub fn get_or_init_gpu_context(
         limits,
         adapter_info,
         display: Arc::new(std::sync::Mutex::new(display_opt)),
+        pipelines: Default::default(),
     };
     *context_lock = Some(new_context.clone());
     Ok(new_context)
@@ -572,31 +573,17 @@ struct FlareParams {
 
 pub struct GpuProcessor {
     context: GpuContext,
-    blur_bgl: wgpu::BindGroupLayout,
-    h_blur_pipeline: wgpu::ComputePipeline,
-    v_blur_pipeline: wgpu::ComputePipeline,
+    pipelines: Arc<GpuPipelines>,
     blur_params_buffer: wgpu::Buffer,
 
-    flare_bgl_0: wgpu::BindGroupLayout,
-    flare_bgl_1: wgpu::BindGroupLayout,
-    flare_threshold_pipeline: wgpu::ComputePipeline,
-    flare_ghosts_pipeline: wgpu::ComputePipeline,
     flare_params_buffer: wgpu::Buffer,
     flare_threshold_view: wgpu::TextureView,
     flare_ghosts_view: wgpu::TextureView,
     flare_final_view: wgpu::TextureView,
-    flare_sampler: wgpu::Sampler,
 
-    main_bgl: wgpu::BindGroupLayout,
-    main_pipeline: wgpu::ComputePipeline,
-    high_precision_bgl: wgpu::BindGroupLayout,
-    high_precision_pipeline: wgpu::ComputePipeline,
     high_precision_tile: std::sync::OnceLock<HighPrecisionTile>,
     tile_output_size: wgpu::Extent3d,
     adjustments_buffer: wgpu::Buffer,
-    dummy_blur_view: wgpu::TextureView,
-    dummy_lut_view: wgpu::TextureView,
-    dummy_lut_sampler: wgpu::Sampler,
     ping_pong_view: wgpu::TextureView,
     sharpness_blur_view: wgpu::TextureView,
     tonal_blur_view: wgpu::TextureView,
@@ -627,9 +614,34 @@ fn high_precision_shader_source() -> String {
 
 const FLARE_MAP_SIZE: u32 = 512;
 
-impl GpuProcessor {
-    pub fn new(context: GpuContext, max_width: u32, max_height: u32) -> Result<Self, String> {
-        let device = &context.device;
+/// Size-independent GPU state. Compiling the shaders is most of the cost of creating a
+/// GpuProcessor, so this is built once per GPU context and shared by every processor.
+pub struct GpuPipelines {
+    blur_bgl: wgpu::BindGroupLayout,
+    h_blur_pipeline: wgpu::ComputePipeline,
+    v_blur_pipeline: wgpu::ComputePipeline,
+    flare_bgl_0: wgpu::BindGroupLayout,
+    flare_bgl_1: wgpu::BindGroupLayout,
+    flare_threshold_pipeline: wgpu::ComputePipeline,
+    flare_ghosts_pipeline: wgpu::ComputePipeline,
+    flare_sampler: wgpu::Sampler,
+    main_bgl: wgpu::BindGroupLayout,
+    main_bgl_entries: Vec<wgpu::BindGroupLayoutEntry>,
+    main_pipeline: wgpu::ComputePipeline,
+    high_precision: std::sync::OnceLock<HighPrecisionPipeline>,
+    dummy_blur_view: wgpu::TextureView,
+    dummy_lut_view: wgpu::TextureView,
+    dummy_lut_sampler: wgpu::Sampler,
+}
+
+/// Only 16-bit exports use it, so it is compiled on first use.
+struct HighPrecisionPipeline {
+    bgl: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+}
+
+impl GpuPipelines {
+    fn new(device: &wgpu::Device) -> Self {
         const MAX_MASK_BINDINGS: u32 = 1;
 
         let blur_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -695,13 +707,6 @@ impl GpuProcessor {
             entry_point: Some("vertical_blur"),
             compilation_options: Default::default(),
             cache: None,
-        });
-
-        let blur_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Blur Params Buffer"),
-            size: std::mem::size_of::<BlurParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         let flare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -809,35 +814,6 @@ impl GpuProcessor {
                 compilation_options: Default::default(),
                 cache: None,
             });
-
-        let flare_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Flare Params Buffer"),
-            size: std::mem::size_of::<FlareParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let flare_tex_desc = wgpu::TextureDescriptor {
-            label: Some("Flare Tex"),
-            size: wgpu::Extent3d {
-                width: FLARE_MAP_SIZE,
-                height: FLARE_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        };
-
-        let flare_threshold_texture = device.create_texture(&flare_tex_desc);
-        let flare_threshold_view = flare_threshold_texture.create_view(&Default::default());
-        let flare_ghosts_texture = device.create_texture(&flare_tex_desc);
-        let flare_ghosts_view = flare_ghosts_texture.create_view(&Default::default());
-        let flare_final_texture = device.create_texture(&flare_tex_desc);
-        let flare_final_view = flare_final_texture.create_view(&Default::default());
 
         let flare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Flare Sampler"),
@@ -992,46 +968,6 @@ impl GpuProcessor {
             cache: None,
         });
 
-        bind_group_layout_entries[1].ty = wgpu::BindingType::StorageTexture {
-            access: wgpu::StorageTextureAccess::WriteOnly,
-            format: wgpu::TextureFormat::Rgba16Float,
-            view_dimension: wgpu::TextureViewDimension::D2,
-        };
-        let high_precision_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("High Precision Main BGL"),
-                entries: &bind_group_layout_entries,
-            });
-        let high_precision_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("High Precision Pipeline Layout"),
-                bind_group_layouts: &[Some(&high_precision_bgl)],
-                immediate_size: 0,
-            });
-        let high_precision_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("High Precision Image Processing Shader"),
-            source: wgpu::ShaderSource::Wgsl(high_precision_shader_source().into()),
-        });
-        let high_precision_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("High Precision Compute Pipeline"),
-                layout: Some(&high_precision_pipeline_layout),
-                module: &high_precision_shader,
-                entry_point: Some("main"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[("HIGH_PRECISION_OUTPUT", 1.0)],
-                    ..Default::default()
-                },
-                cache: None,
-            });
-
-        let adjustments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Adjustments Buffer"),
-            size: std::mem::size_of::<AllAdjustments>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let dummy_texture_desc = wgpu::TextureDescriptor {
             label: Some("Dummy Texture"),
             size: wgpu::Extent3d {
@@ -1055,6 +991,120 @@ impl GpuProcessor {
         });
         let dummy_lut_view = dummy_lut_texture.create_view(&Default::default());
         let dummy_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+
+        Self {
+            blur_bgl,
+            h_blur_pipeline,
+            v_blur_pipeline,
+            flare_bgl_0,
+            flare_bgl_1,
+            flare_threshold_pipeline,
+            flare_ghosts_pipeline,
+            flare_sampler,
+            main_bgl,
+            main_bgl_entries: bind_group_layout_entries,
+            main_pipeline,
+            high_precision: std::sync::OnceLock::new(),
+            dummy_blur_view,
+            dummy_lut_view,
+            dummy_lut_sampler,
+        }
+    }
+
+    fn high_precision(&self, device: &wgpu::Device) -> &HighPrecisionPipeline {
+        self.high_precision.get_or_init(|| {
+            let mut bind_group_layout_entries = self.main_bgl_entries.clone();
+            bind_group_layout_entries[1].ty = wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba16Float,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            };
+            let high_precision_bgl =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("High Precision Main BGL"),
+                    entries: &bind_group_layout_entries,
+                });
+            let high_precision_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("High Precision Pipeline Layout"),
+                    bind_group_layouts: &[Some(&high_precision_bgl)],
+                    immediate_size: 0,
+                });
+            let high_precision_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("High Precision Image Processing Shader"),
+                source: wgpu::ShaderSource::Wgsl(high_precision_shader_source().into()),
+            });
+            let high_precision_pipeline =
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("High Precision Compute Pipeline"),
+                    layout: Some(&high_precision_pipeline_layout),
+                    module: &high_precision_shader,
+                    entry_point: Some("main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("HIGH_PRECISION_OUTPUT", 1.0)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                });
+            HighPrecisionPipeline {
+                bgl: high_precision_bgl,
+                pipeline: high_precision_pipeline,
+            }
+        })
+    }
+}
+
+impl GpuProcessor {
+    pub fn new(context: GpuContext, max_width: u32, max_height: u32) -> Result<Self, String> {
+        let device = &context.device;
+        let pipelines = Arc::clone(
+            context
+                .pipelines
+                .get_or_init(|| Arc::new(GpuPipelines::new(device))),
+        );
+
+        let blur_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Blur Params Buffer"),
+            size: std::mem::size_of::<BlurParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let flare_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Flare Params Buffer"),
+            size: std::mem::size_of::<FlareParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let flare_tex_desc = wgpu::TextureDescriptor {
+            label: Some("Flare Tex"),
+            size: wgpu::Extent3d {
+                width: FLARE_MAP_SIZE,
+                height: FLARE_MAP_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        };
+
+        let flare_threshold_texture = device.create_texture(&flare_tex_desc);
+        let flare_threshold_view = flare_threshold_texture.create_view(&Default::default());
+        let flare_ghosts_texture = device.create_texture(&flare_tex_desc);
+        let flare_ghosts_view = flare_ghosts_texture.create_view(&Default::default());
+        let flare_final_texture = device.create_texture(&flare_tex_desc);
+        let flare_final_view = flare_final_texture.create_view(&Default::default());
+
+        let adjustments_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Adjustments Buffer"),
+            size: std::mem::size_of::<AllAdjustments>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         const TILE_SIZE: u32 = 2048;
         const TILE_OVERLAP: u32 = 128;
@@ -1159,29 +1209,15 @@ impl GpuProcessor {
 
         Ok(Self {
             context,
-            blur_bgl,
-            h_blur_pipeline,
-            v_blur_pipeline,
+            pipelines,
             blur_params_buffer,
-            flare_bgl_0,
-            flare_bgl_1,
-            flare_threshold_pipeline,
-            flare_ghosts_pipeline,
             flare_params_buffer,
             flare_threshold_view,
             flare_ghosts_view,
             flare_final_view,
-            flare_sampler,
-            main_bgl,
-            main_pipeline,
-            high_precision_bgl,
-            high_precision_pipeline,
             high_precision_tile: std::sync::OnceLock::new(),
             tile_output_size: clamped_tile_size,
             adjustments_buffer,
-            dummy_blur_view,
-            dummy_lut_view,
-            dummy_lut_sampler,
             ping_pong_view,
             sharpness_blur_view,
             tonal_blur_view,
@@ -1238,24 +1274,27 @@ impl GpuProcessor {
             );
         }
 
-        let high_precision_tile = if output_precision == RenderOutputPrecision::SixteenBit {
-            Some(self.high_precision_tile())
+        let high_precision = if output_precision == RenderOutputPrecision::SixteenBit {
+            Some((
+                self.pipelines.high_precision(device),
+                self.high_precision_tile(),
+            ))
         } else {
             None
         };
         let (output_pipeline, output_bgl, output_tile_texture, output_tile_view, bytes_per_pixel) =
-            if let Some(high_precision_tile) = high_precision_tile {
+            if let Some((high_precision_pipeline, high_precision_tile)) = high_precision {
                 (
-                    &self.high_precision_pipeline,
-                    &self.high_precision_bgl,
+                    &high_precision_pipeline.pipeline,
+                    &high_precision_pipeline.bgl,
                     &high_precision_tile.texture,
                     &high_precision_tile.view,
                     8,
                 )
             } else {
                 (
-                    &self.main_pipeline,
-                    &self.main_bgl,
+                    &self.pipelines.main_pipeline,
+                    &self.pipelines.main_bgl,
                     &self.tile_output_texture,
                     &self.tile_output_texture_view,
                     4,
@@ -1349,7 +1388,10 @@ impl GpuProcessor {
             });
             (view, sampler)
         } else {
-            (self.dummy_lut_view.clone(), self.dummy_lut_sampler.clone())
+            (
+                self.pipelines.dummy_lut_view.clone(),
+                self.pipelines.dummy_lut_sampler.clone(),
+            )
         };
 
         mask_lut_span.gpu_sync(device);
@@ -1379,7 +1421,7 @@ impl GpuProcessor {
 
             let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Flare BG0"),
-                layout: &self.flare_bgl_0,
+                layout: &self.pipelines.flare_bgl_0,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1395,21 +1437,21 @@ impl GpuProcessor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.flare_sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.pipelines.flare_sampler),
                     },
                 ],
             });
 
             {
                 let mut cpass = encoder.begin_compute_pass(&Default::default());
-                cpass.set_pipeline(&self.flare_threshold_pipeline);
+                cpass.set_pipeline(&self.pipelines.flare_threshold_pipeline);
                 cpass.set_bind_group(0, &bg0, &[]);
                 cpass.dispatch_workgroups(FLARE_MAP_SIZE / 16, FLARE_MAP_SIZE / 16, 1);
             }
 
             let bg0_ghosts = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Flare BG0 Ghosts"),
-                layout: &self.flare_bgl_0,
+                layout: &self.pipelines.flare_bgl_0,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1425,14 +1467,14 @@ impl GpuProcessor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.flare_sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.pipelines.flare_sampler),
                     },
                 ],
             });
 
             let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Flare BG1"),
-                layout: &self.flare_bgl_1,
+                layout: &self.pipelines.flare_bgl_1,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -1447,7 +1489,7 @@ impl GpuProcessor {
 
             {
                 let mut cpass = encoder.begin_compute_pass(&Default::default());
-                cpass.set_pipeline(&self.flare_ghosts_pipeline);
+                cpass.set_pipeline(&self.pipelines.flare_ghosts_pipeline);
                 cpass.set_bind_group(0, &bg0_ghosts, &[]);
                 cpass.set_bind_group(1, &bg1, &[]);
                 cpass.dispatch_workgroups(FLARE_MAP_SIZE / 16, FLARE_MAP_SIZE / 16, 1);
@@ -1527,7 +1569,7 @@ impl GpuProcessor {
 
                     let h_blur_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("H-Blur BG"),
-                        layout: &self.blur_bgl,
+                        layout: &self.pipelines.blur_bgl,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
@@ -1546,14 +1588,14 @@ impl GpuProcessor {
 
                     {
                         let mut cpass = blur_encoder.begin_compute_pass(&Default::default());
-                        cpass.set_pipeline(&self.h_blur_pipeline);
+                        cpass.set_pipeline(&self.pipelines.h_blur_pipeline);
                         cpass.set_bind_group(0, &h_blur_bg, &[]);
                         cpass.dispatch_workgroups(input_width.div_ceil(256), input_height, 1);
                     }
 
                     let v_blur_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("V-Blur BG"),
-                        layout: &self.blur_bgl,
+                        layout: &self.pipelines.blur_bgl,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
@@ -1572,7 +1614,7 @@ impl GpuProcessor {
 
                     {
                         let mut cpass = blur_encoder.begin_compute_pass(&Default::default());
-                        cpass.set_pipeline(&self.v_blur_pipeline);
+                        cpass.set_pipeline(&self.pipelines.v_blur_pipeline);
                         cpass.set_bind_group(0, &v_blur_bg, &[]);
                         cpass.dispatch_workgroups(input_width, input_height.div_ceil(256), 1);
                     }
@@ -1631,7 +1673,7 @@ impl GpuProcessor {
                     resource: wgpu::BindingResource::TextureView(if did_create_sharpness_blur {
                         &self.sharpness_blur_view
                     } else {
-                        &self.dummy_blur_view
+                        &self.pipelines.dummy_blur_view
                     }),
                 });
                 bind_group_entries.push(wgpu::BindGroupEntry {
@@ -1639,7 +1681,7 @@ impl GpuProcessor {
                     resource: wgpu::BindingResource::TextureView(if did_create_tonal_blur {
                         &self.tonal_blur_view
                     } else {
-                        &self.dummy_blur_view
+                        &self.pipelines.dummy_blur_view
                     }),
                 });
                 bind_group_entries.push(wgpu::BindGroupEntry {
@@ -1647,7 +1689,7 @@ impl GpuProcessor {
                     resource: wgpu::BindingResource::TextureView(if did_create_clarity_blur {
                         &self.clarity_blur_view
                     } else {
-                        &self.dummy_blur_view
+                        &self.pipelines.dummy_blur_view
                     }),
                 });
                 bind_group_entries.push(wgpu::BindGroupEntry {
@@ -1655,7 +1697,7 @@ impl GpuProcessor {
                     resource: wgpu::BindingResource::TextureView(if did_create_structure_blur {
                         &self.structure_blur_view
                     } else {
-                        &self.dummy_blur_view
+                        &self.pipelines.dummy_blur_view
                     }),
                 });
 
@@ -1665,12 +1707,12 @@ impl GpuProcessor {
                     resource: wgpu::BindingResource::TextureView(if use_flare {
                         &self.flare_ghosts_view
                     } else {
-                        &self.dummy_blur_view
+                        &self.pipelines.dummy_blur_view
                     }),
                 });
                 bind_group_entries.push(wgpu::BindGroupEntry {
                     binding: 10 + MAX_MASK_BINDINGS,
-                    resource: wgpu::BindingResource::Sampler(&self.flare_sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.pipelines.flare_sampler),
                 });
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
