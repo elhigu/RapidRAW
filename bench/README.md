@@ -85,24 +85,26 @@ uses, and prints the median and p90 time of each phase with a per-stage breakdow
 `job.transformed_preview_base`, so stage times don't add up to the phase total. It uses your
 saved app settings and writes to the normal app log.
 
-| Phase                | What it measures                                                                                 |
-| :------------------- | :----------------------------------------------------------------------------------------------- |
-| `open`               | Decoding and raw pre-processing of the file                                                      |
-| `first`              | The first editor frame after opening (always runs)                                               |
-| `style`              | A preview render after changing several adjustments at once, like applying a preset              |
-| `drag`               | Interactive slider updates                                                                       |
-| `geometry`           | A preview render after a rotation change                                                         |
-| `full_cold` / `full` | A full-resolution render as used by the culling view, before and after the file has been decoded |
+| Phase                                  | What it measures                                                                                 |
+| :------------------------------------- | :----------------------------------------------------------------------------------------------- |
+| `open`                                 | Decoding and raw pre-processing of the file                                                      |
+| `first`                                | The first editor frame after opening (always runs)                                               |
+| `style`                                | A preview render after changing several adjustments at once, like applying a preset              |
+| `drag`                                 | Interactive slider updates                                                                       |
+| `geometry`                             | A preview render after a rotation change                                                         |
+| `full_cold` / `full`                   | A full-resolution render as used by the culling view, before and after the file has been decoded |
+| `navigate_cold` / `navigate_preloaded` | Opening the next image in the editor, without and with preloading it first                       |
 
-| Option                 | Description                                                                    | Default                |
-| :--------------------- | :----------------------------------------------------------------------------- | :--------------------- |
-| `<image>`              | Image file to benchmark                                                        | _(Required)_           |
-| `--adjustments <path>` | Adjustments JSON or `.rrdata` file to use instead of the image's sidecar       | `<image>.rrdata`       |
-| `--iters <n>`          | Iterations per phase (`geometry` uses n/4 and `full` n/5, at least 3)          | `20`                   |
-| `--preview-dim <px>`   | Preview resolution                                                             | Editor preview setting |
-| `--phases <list>`      | Comma-separated subset of `open,style,drag,geometry,full`                      | All                    |
-| `--gpu-sync`           | Wait for the GPU after each GPU stage, so its time is attributed to that stage | Off                    |
-| `--json <path>`        | Also write every iteration's timings and each phase's output hash as JSON      | Off                    |
+| Option                 | Description                                                                       | Default                      |
+| :--------------------- | :-------------------------------------------------------------------------------- | :--------------------------- |
+| `<image>`              | Image file to benchmark                                                           | _(Required)_                 |
+| `--adjustments <path>` | Adjustments JSON or `.rrdata` file to use instead of the image's sidecar          | `<image>.rrdata`             |
+| `--iters <n>`          | Iterations per phase (`geometry` uses n/4, `full` and `navigate` n/5, at least 3) | `20`                         |
+| `--preview-dim <px>`   | Preview resolution                                                                | Editor preview setting       |
+| `--phases <list>`      | Comma-separated subset of `open,style,drag,geometry,full,navigate`                | All                          |
+| `--gpu-sync`           | Wait for the GPU after each GPU stage, so its time is attributed to that stage    | Off                          |
+| `--json <path>`        | Also write every iteration's timings and each phase's output hash as JSON         | Off                          |
+| `--next <image>`       | Image to open in the `navigate` phase                                             | Next file in the same folder |
 
 Each phase records a blake3 hash of its first output. To compare two builds, for example
 before and after a change:

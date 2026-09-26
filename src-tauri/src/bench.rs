@@ -18,9 +18,10 @@ pub struct BenchSession {
     pub phases: Vec<String>,
     pub gpu_sync: bool,
     pub json_out: Option<String>,
+    pub next: Option<String>,
 }
 
-const PHASES: [&str; 5] = ["open", "style", "drag", "geometry", "full"];
+const PHASES: [&str; 6] = ["open", "style", "drag", "geometry", "full", "navigate"];
 
 pub fn parse_bench_args(args: &[String]) -> Result<BenchSession, String> {
     let mut iter = args.iter();
@@ -32,6 +33,7 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchSession, String> {
         phases: PHASES.iter().map(|s| s.to_string()).collect(),
         gpu_sync: false,
         json_out: None,
+        next: None,
     };
     while let Some(arg) = iter.next() {
         let mut value = |name: &str| {
@@ -72,6 +74,7 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchSession, String> {
             }
             "--gpu-sync" => session.gpu_sync = true,
             "--json" => session.json_out = Some(value(arg)?),
+            "--next" => session.next = Some(value(arg)?),
             s if !s.starts_with('-') && session.source.is_empty() => session.source = s.to_string(),
             other => return Err(format!("Unknown bench argument '{}'", other)),
         }
@@ -352,6 +355,66 @@ pub async fn run_headless_bench(
         }
     }
 
+    if wants("navigate") {
+        match session
+            .next
+            .clone()
+            .or_else(|| next_image_in_folder(&session.source))
+        {
+            None => println!("Skipping navigate: no other image in the folder (use --next)."),
+            Some(next) => {
+                let pool = crate::image_preload::preload_pool().map_err(|e| e.to_string())?;
+                let settings =
+                    crate::app_settings::load_settings(app_handle.clone()).unwrap_or_default();
+                for (label, preload) in [("navigate_cold", false), ("navigate_preloaded", true)] {
+                    let mut phase = Phase::default();
+                    for _ in 0..(n / 5).max(3) {
+                        let state = app_handle.state::<AppState>();
+                        state.decoded_image_cache.lock().unwrap().clear();
+                        crate::image_loader::load_image(
+                            session.source.clone(),
+                            app_handle.state::<AppState>(),
+                            app_handle.clone(),
+                        )
+                        .await?;
+                        if preload {
+                            let generation = state
+                                .preload_generation
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                + 1;
+                            crate::image_preload::run_preload(
+                                &state,
+                                &pool,
+                                &settings,
+                                std::slice::from_ref(&next),
+                                generation,
+                            );
+                        }
+                        let _ = perf_trace::take();
+                        let start = Instant::now();
+                        crate::image_loader::load_image(
+                            next.clone(),
+                            app_handle.state::<AppState>(),
+                            app_handle.clone(),
+                        )
+                        .await?;
+                        let total = start.elapsed();
+                        let mut stages = BTreeMap::new();
+                        for (name, d) in perf_trace::take() {
+                            *stages.entry(name).or_insert(Duration::ZERO) += d;
+                        }
+                        if let Some(loaded) = state.original_image.lock().unwrap().as_ref() {
+                            phase.record_output(loaded.image.as_bytes());
+                        }
+                        phase.iterations.push(Iteration { total, stages });
+                    }
+                    phase.extra.push(format!("next image {}", next));
+                    phases.push((label, phase));
+                }
+            }
+        }
+    }
+
     report(&phases);
 
     if let Some(out) = &session.json_out {
@@ -399,6 +462,22 @@ pub async fn run_headless_bench(
         println!("\nWrote {}", out);
     }
     Ok(())
+}
+
+fn next_image_in_folder(source: &str) -> Option<String> {
+    let source = std::path::Path::new(source);
+    let extension = source.extension()?.to_ascii_lowercase();
+    let mut siblings: Vec<std::path::PathBuf> = std::fs::read_dir(source.parent()?)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|e| e.to_ascii_lowercase()) == Some(extension.clone()))
+        .collect();
+    siblings.sort();
+    let index = siblings
+        .iter()
+        .position(|p| p.file_name() == source.file_name())?;
+    let next = siblings.get(index + 1).or_else(|| siblings.first())?;
+    (next.file_name() != source.file_name()).then(|| next.to_string_lossy().to_string())
 }
 
 fn resp_bytes(resp: tauri::ipc::Response) -> Vec<u8> {
