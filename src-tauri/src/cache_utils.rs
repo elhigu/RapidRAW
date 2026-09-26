@@ -1,9 +1,12 @@
 use crate::AppState;
+use crate::app_settings::AppSettings;
 use image::DynamicImage;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::SystemTime;
 
 pub const GEOMETRY_KEYS: &[&str] = &[
     "transformDistortion",
@@ -397,9 +400,51 @@ pub fn calculate_full_job_hash(path: &str, adjustments: &serde_json::Value) -> u
     hasher.finish()
 }
 
+/// A path alone goes stale: tethering reuses file names and raw settings change the pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodeFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+    settings_hash: u64,
+}
+
+impl DecodeFingerprint {
+    pub fn for_file(path: &Path, settings: &AppSettings) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let mut hasher = DefaultHasher::new();
+        settings
+            .raw_highlight_compression
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings.linear_raw_mode.hash(&mut hasher);
+        settings
+            .raw_preprocessing_color_nr
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings
+            .raw_preprocessing_sharpening
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings.apply_preprocessing_to_non_raws.hash(&mut hasher);
+        settings.use_apple_raw9.hash(&mut hasher);
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            settings_hash: hasher.finish(),
+        })
+    }
+}
+
+struct DecodedEntry {
+    path: String,
+    fingerprint: DecodeFingerprint,
+    image: Arc<DynamicImage>,
+    exif: HashMap<String, String>,
+}
+
 pub struct DecodedImageCache {
     capacity: usize,
-    items: Vec<(String, Arc<DynamicImage>, HashMap<String, String>)>,
+    items: Vec<DecodedEntry>,
 }
 
 impl DecodedImageCache {
@@ -417,15 +462,19 @@ impl DecodedImageCache {
         }
     }
 
-    pub fn get(&mut self, path: &str) -> Option<(Arc<DynamicImage>, HashMap<String, String>)> {
-        if let Some(pos) = self.items.iter().position(|(p, _, _)| p == path) {
-            let item = self.items.remove(pos);
-            let result = (item.1.clone(), item.2.clone());
-            self.items.push(item);
-            Some(result)
-        } else {
-            None
+    pub fn get(
+        &mut self,
+        path: &str,
+        fingerprint: &DecodeFingerprint,
+    ) -> Option<(Arc<DynamicImage>, HashMap<String, String>)> {
+        let pos = self.items.iter().position(|e| e.path == path)?;
+        let entry = self.items.remove(pos);
+        if entry.fingerprint != *fingerprint {
+            return None;
         }
+        let result = (entry.image.clone(), entry.exif.clone());
+        self.items.push(entry);
+        Some(result)
     }
 
     pub fn clear(&mut self) {
@@ -435,15 +484,82 @@ impl DecodedImageCache {
     pub fn insert(
         &mut self,
         path: String,
+        fingerprint: DecodeFingerprint,
         image: Arc<DynamicImage>,
         exif: HashMap<String, String>,
     ) {
-        if let Some(pos) = self.items.iter().position(|(p, _, _)| *p == path) {
+        if let Some(pos) = self.items.iter().position(|e| e.path == path) {
             self.items.remove(pos);
         } else if self.items.len() >= self.capacity {
             self.items.remove(0);
         }
-        self.items.push((path, image, exif));
+        self.items.push(DecodedEntry {
+            path,
+            fingerprint,
+            image,
+            exif,
+        });
+    }
+}
+
+/// Lets concurrent callers share one decode of a file instead of each decoding it.
+#[derive(Default)]
+pub struct DecodeFlights {
+    inflight: Mutex<HashMap<String, Arc<Flight>>>,
+}
+
+#[derive(Default)]
+pub struct Flight {
+    done: Mutex<bool>,
+    finished: Condvar,
+}
+
+impl Flight {
+    pub fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while !*done {
+            done = self.finished.wait(done).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+pub enum FlightRole<'a> {
+    Leader(FlightGuard<'a>),
+    Follower(Arc<Flight>),
+}
+
+/// Wakes waiters when dropped, including on error or panic.
+pub struct FlightGuard<'a> {
+    flights: &'a DecodeFlights,
+    path: String,
+    flight: Arc<Flight>,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights
+            .inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.path);
+        *self.flight.done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.flight.finished.notify_all();
+    }
+}
+
+impl DecodeFlights {
+    pub fn begin(&self, path: &str) -> FlightRole<'_> {
+        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = inflight.get(path) {
+            return FlightRole::Follower(Arc::clone(flight));
+        }
+        let flight = Arc::new(Flight::default());
+        inflight.insert(path.to_string(), Arc::clone(&flight));
+        FlightRole::Leader(FlightGuard {
+            flights: self,
+            path: path.to_string(),
+            flight,
+        })
     }
 }
 
