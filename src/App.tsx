@@ -47,6 +47,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useThumbnails } from './hooks/useThumbnails';
 import { ImageDimensions } from './hooks/useImageRenderSize';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
+import { useAdjacentImagePreload } from './hooks/useAdjacentImagePreload';
 import { useTauriListeners } from './hooks/useTauriListeners';
 import { useFileOperations } from './hooks/useFileOperations';
 import { useAppContextMenus } from './hooks/useAppContextMenus';
@@ -374,6 +375,7 @@ function App() {
   } = useLibraryActions(handleImageSelect);
 
   const { displayList: sortedImageList, badges: groupBadgeInfo } = useSortedLibrary();
+  useAdjacentImagePreload(sortedImageList);
 
   const handleLibraryRefresh = useCallback(async () => {
     if (currentFolderPath) {
