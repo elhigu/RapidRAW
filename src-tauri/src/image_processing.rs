@@ -2823,17 +2823,24 @@ pub fn remove_raw_artifacts_and_enhance(
     color_nr_inv_sigma: f32,
     sharpening_amount: f32,
 ) {
-    let mut buffer = to_rgb32f_parallel(image);
-    let w = buffer.width() as usize;
-    let h = buffer.height() as usize;
+    let (width, height) = image.dimensions();
+    let w = width as usize;
+    let h = height as usize;
+    let converted = match &*image {
+        DynamicImage::ImageRgba32F(_) | DynamicImage::ImageRgb32F(_) => None,
+        other => Some(other.to_rgb32f()),
+    };
 
+    let (src, channels): (&[f32], usize) = match (&converted, &*image) {
+        (Some(rgb), _) => (rgb.as_raw(), 3),
+        (None, DynamicImage::ImageRgba32F(rgba)) => (rgba.as_raw(), 4),
+        (None, DynamicImage::ImageRgb32F(rgb)) => (rgb.as_raw(), 3),
+        (None, _) => unreachable!("other formats are converted above"),
+    };
     let mut ycbcr_buffer = vec![0.0f32; w * h * 3];
-
-    let src = buffer.as_raw();
-
     ycbcr_buffer
         .par_chunks_mut(3)
-        .zip(src.par_chunks(3))
+        .zip(src.par_chunks(channels))
         .for_each(|(dest, pixel)| {
             let (y, cb, cr) = rgb_to_yc_only(pixel[0], pixel[1], pixel[2]);
             dest[0] = y;
@@ -2841,6 +2848,12 @@ pub fn remove_raw_artifacts_and_enhance(
             dest[2] = cr;
         });
 
+    // Colour noise reduction writes every output pixel, so it doesn't need a copy of the image.
+    let mut buffer: Rgb32FImage = if color_nr_inv_sigma > 0.0 {
+        Rgb32FImage::new(width, height)
+    } else {
+        converted.unwrap_or_else(|| to_rgb32f_parallel(image))
+    };
     if color_nr_inv_sigma > 0.0 {
         let base_inv_sigma = color_nr_inv_sigma;
         const OFFSETS: [isize; 3] = [-5, -1, 3];
