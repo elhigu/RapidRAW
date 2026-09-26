@@ -85,14 +85,14 @@ uses, and prints the median and p90 time of each phase with a per-stage breakdow
 `job.transformed_preview_base`, so stage times don't add up to the phase total. It uses your
 saved app settings and writes to the normal app log.
 
-| Phase      | What it measures                                                                    |
-| :--------- | :---------------------------------------------------------------------------------- |
-| `open`     | Decoding and raw pre-processing of the file                                         |
-| `first`    | The first editor frame after opening (always runs)                                  |
-| `style`    | A preview render after changing several adjustments at once, like applying a preset |
-| `drag`     | Interactive slider updates                                                          |
-| `geometry` | A preview render after a rotation change                                            |
-| `full`     | A full-resolution render as used by the culling view                                |
+| Phase                | What it measures                                                                                 |
+| :------------------- | :----------------------------------------------------------------------------------------------- |
+| `open`               | Decoding and raw pre-processing of the file                                                      |
+| `first`              | The first editor frame after opening (always runs)                                               |
+| `style`              | A preview render after changing several adjustments at once, like applying a preset              |
+| `drag`               | Interactive slider updates                                                                       |
+| `geometry`           | A preview render after a rotation change                                                         |
+| `full_cold` / `full` | A full-resolution render as used by the culling view, before and after the file has been decoded |
 
 | Option                 | Description                                                                    | Default                |
 | :--------------------- | :----------------------------------------------------------------------------- | :--------------------- |

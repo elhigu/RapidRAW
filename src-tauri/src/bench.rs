@@ -319,27 +319,37 @@ pub async fn run_headless_bench(
     }
 
     if wants("full") {
-        let mut phase = Phase::default();
-        let mut bytes = 0;
-        for i in 0..(n / 5).max(3) {
-            let adj = with_style(&adjustments, i);
-            let path = session.source.clone();
-            let h = app_handle.clone();
-            let _ = perf_trace::take();
-            let start = Instant::now();
-            let resp = crate::generate_preview_for_path(path, adj, h).await?;
-            let total = start.elapsed();
-            let mut stages = BTreeMap::new();
-            for (name, d) in perf_trace::take() {
-                *stages.entry(name).or_insert(Duration::ZERO) += d;
+        for (label, clear_cache) in [("full_cold", true), ("full", false)] {
+            let mut phase = Phase::default();
+            let mut bytes = 0;
+            for i in 0..(n / 5).max(3) {
+                if clear_cache {
+                    app_handle
+                        .state::<AppState>()
+                        .decoded_image_cache
+                        .lock()
+                        .unwrap()
+                        .clear();
+                }
+                let adj = with_style(&adjustments, i);
+                let path = session.source.clone();
+                let h = app_handle.clone();
+                let _ = perf_trace::take();
+                let start = Instant::now();
+                let resp = crate::generate_preview_for_path(path, adj, h).await?;
+                let total = start.elapsed();
+                let mut stages = BTreeMap::new();
+                for (name, d) in perf_trace::take() {
+                    *stages.entry(name).or_insert(Duration::ZERO) += d;
+                }
+                let out = resp_bytes(resp);
+                phase.record_output(&out);
+                bytes = out.len();
+                phase.iterations.push(Iteration { total, stages });
             }
-            let out = resp_bytes(resp);
-            phase.record_output(&out);
-            bytes = out.len();
-            phase.iterations.push(Iteration { total, stages });
+            phase.extra.push(format!("full-res JPEG {} bytes", bytes));
+            phases.push((label, phase));
         }
-        phase.extra.push(format!("full-res JPEG {} bytes", bytes));
-        phases.push(("full", phase));
     }
 
     report(&phases);
