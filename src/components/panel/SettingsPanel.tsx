@@ -526,6 +526,7 @@ export default function SettingsPanel({
       appSettings?.useWgpuRenderer ?? (osPlatform === 'linux' || osPlatform === 'android' ? false : true),
     thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
     imageCacheSize: appSettings?.imageCacheSize ?? 5,
+    preloadAdjacentImages: appSettings?.preloadAdjacentImages ?? false,
     rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
     rawPreprocessingSharpening: appSettings?.rawPreprocessingSharpening ?? 0.35,
     applyPreprocessingToNonRaws: appSettings?.applyPreprocessingToNonRaws ?? false,
@@ -635,6 +636,7 @@ export default function SettingsPanel({
       useWgpuRenderer: appSettings?.useWgpuRenderer ?? true,
       thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
       imageCacheSize: appSettings?.imageCacheSize ?? 5,
+      preloadAdjacentImages: appSettings?.preloadAdjacentImages ?? false,
       rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
       rawPreprocessingSharpening: appSettings?.rawPreprocessingSharpening ?? 0.35,
       applyPreprocessingToNonRaws: appSettings?.applyPreprocessingToNonRaws ?? false,
@@ -1900,6 +1902,18 @@ export default function SettingsPanel({
                             handleProcessingSettingChange('imageCacheSize', parseInt(e.target.value))
                           }
                           fillOrigin="min"
+                        />
+                      </SettingItem>
+
+                      <SettingItem
+                        label={t('settings.processing.preloadAdjacent')}
+                        description={t('settings.processing.preloadAdjacentDesc')}
+                      >
+                        <Switch
+                          checked={processingSettings.preloadAdjacentImages}
+                          id="preload-adjacent-images-toggle"
+                          label={t('settings.processing.enablePreloadAdjacent')}
+                          onChange={(checked) => handleProcessingSettingChange('preloadAdjacentImages', checked)}
                         />
                       </SettingItem>
 

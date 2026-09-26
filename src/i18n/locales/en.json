@@ -1744,6 +1744,7 @@
       },
       "dynamicDesc": "The editor renders the preview to match your display's actual pixel density. This ensures that every detail is represented with 1:1 pixel accuracy, providing maximum clarity when zooming and checking focus.",
       "enableLivePreviews": "Enable Live Previews",
+      "enablePreloadAdjacent": "Enable Preloading",
       "highDpi": "High-DPI Rendering",
       "highDpiDesc": "Render previews at your screen's native {{dpr}}x physical pixel resolution. Produces the sharpest possible preview but uses significantly more memory.",
       "highDpiDescStandard": "This setting only affects high-DPI displays. Your current display is standard resolution.",
@@ -1764,6 +1765,8 @@
         "static": "Fixed Resolution"
       },
       "nativeDpi": "Render at native DPI",
+      "preloadAdjacent": "Preload Neighboring Images",
+      "preloadAdjacentDesc": "Decode the next and previous images in the background while you view one, so moving through photos with the arrow keys opens them instantly. Keeps two extra full-resolution images in RAM.",
       "preprocessing": {
         "appleRaw9": "Apple RAW 9 Engine",
         "appleRaw9Desc": "Develop RAW files with Apple's Core Image RAW 9 decoder, which demosaics and denoises in one step on the Neural Engine. Requires macOS 27 or later and a supported camera; unsupported files automatically use the built-in decoder. Slower than the default decoder. Thumbnails are not affected.",

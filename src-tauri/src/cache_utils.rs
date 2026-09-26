@@ -345,6 +345,16 @@ impl DecodedImageCache {
     }
 }
 
+/// Preloading needs room for the current image and both neighbours.
+pub fn decoded_cache_capacity(settings: &AppSettings) -> usize {
+    let size = settings.image_cache_size.unwrap_or(5) as usize;
+    if settings.preload_adjacent_images.unwrap_or(false) {
+        size.max(3)
+    } else {
+        size
+    }
+}
+
 /// Lets concurrent callers share one decode of a file instead of each decoding it.
 #[derive(Default)]
 pub struct DecodeFlights {
@@ -533,6 +543,19 @@ mod tests {
         assert!(cache.get("b", &fp).is_none());
         assert!(cache.get("a", &fp).is_some());
         assert!(cache.get("c", &fp).is_some());
+    }
+
+    #[test]
+    fn preloading_reserves_room_for_both_neighbours() {
+        let mut settings = AppSettings {
+            image_cache_size: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(decoded_cache_capacity(&settings), 2);
+        settings.preload_adjacent_images = Some(true);
+        assert_eq!(decoded_cache_capacity(&settings), 3);
+        settings.image_cache_size = Some(8);
+        assert_eq!(decoded_cache_capacity(&settings), 8);
     }
 
     #[test]

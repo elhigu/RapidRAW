@@ -539,6 +539,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub image_cache_size: Option<u32>,
     #[serde(default)]
+    pub preload_adjacent_images: Option<bool>,
+    #[serde(default)]
     pub tonemapper_override_enabled: Option<bool>,
     #[serde(default)]
     pub default_raw_tonemapper: Option<String>,
@@ -659,6 +661,7 @@ impl Default for AppSettings {
             image_cache_size: Some(2),
             #[cfg(not(target_os = "android"))]
             image_cache_size: Some(5),
+            preload_adjacent_images: Some(false),
             tonemapper_override_enabled: Some(false),
             default_raw_tonemapper: Some("agx".to_string()),
             default_non_raw_tonemapper: Some("basic".to_string()),
@@ -777,11 +780,10 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
     fs::write(path, json_string).map_err(|e| e.to_string())?;
 
     let state = app_handle.state::<AppState>();
-    let cache_size = settings.image_cache_size.unwrap_or(5) as usize;
     state
         .decoded_image_cache
         .lock()
         .unwrap()
-        .set_capacity(cache_size);
+        .set_capacity(crate::cache_utils::decoded_cache_capacity(&settings));
     Ok(())
 }
