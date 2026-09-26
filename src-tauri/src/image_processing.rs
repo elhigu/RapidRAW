@@ -2,7 +2,7 @@ use crate::gpu_processing::WgpuDisplay;
 use crate::guided_perspective::{GuideLine, compute_guided_homography, count_valid_lines};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec2, Vec3};
-use image::{DynamicImage, GenericImageView, Rgb32FImage, Rgba};
+use image::{DynamicImage, GenericImageView, ImageBuffer, Pixel, Primitive, Rgb32FImage, Rgba};
 use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_center};
 use nalgebra::{Matrix3 as NaMatrix3, Vector3 as NaVector3};
 use rawler::decoders::Orientation;
@@ -1235,6 +1235,25 @@ pub fn apply_linear_to_srgb(mut image: DynamicImage) -> DynamicImage {
 }
 
 pub fn apply_orientation(image: DynamicImage, orientation: Orientation) -> DynamicImage {
+    if matches!(orientation, Orientation::Normal | Orientation::Unknown) {
+        return image;
+    }
+    match image {
+        DynamicImage::ImageLuma8(b) => DynamicImage::ImageLuma8(orient(&b, orientation)),
+        DynamicImage::ImageLumaA8(b) => DynamicImage::ImageLumaA8(orient(&b, orientation)),
+        DynamicImage::ImageRgb8(b) => DynamicImage::ImageRgb8(orient(&b, orientation)),
+        DynamicImage::ImageRgba8(b) => DynamicImage::ImageRgba8(orient(&b, orientation)),
+        DynamicImage::ImageLuma16(b) => DynamicImage::ImageLuma16(orient(&b, orientation)),
+        DynamicImage::ImageLumaA16(b) => DynamicImage::ImageLumaA16(orient(&b, orientation)),
+        DynamicImage::ImageRgb16(b) => DynamicImage::ImageRgb16(orient(&b, orientation)),
+        DynamicImage::ImageRgba16(b) => DynamicImage::ImageRgba16(orient(&b, orientation)),
+        DynamicImage::ImageRgb32F(b) => DynamicImage::ImageRgb32F(orient(&b, orientation)),
+        DynamicImage::ImageRgba32F(b) => DynamicImage::ImageRgba32F(orient(&b, orientation)),
+        other => orient_with_image_crate(other, orientation),
+    }
+}
+
+fn orient_with_image_crate(image: DynamicImage, orientation: Orientation) -> DynamicImage {
     match orientation {
         Orientation::Normal | Orientation::Unknown => image,
         Orientation::HorizontalFlip => image.fliph(),
@@ -1245,6 +1264,59 @@ pub fn apply_orientation(image: DynamicImage, orientation: Orientation) -> Dynam
         Orientation::Transverse => image.rotate270().fliph(),
         Orientation::Rotate270 => image.rotate270(),
     }
+}
+
+/// Same pixels as the image crate's flips and rotations, in one parallel pass.
+fn orient<P>(
+    src: &ImageBuffer<P, Vec<P::Subpixel>>,
+    orientation: Orientation,
+) -> ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: Pixel + Send + Sync,
+    P::Subpixel: Send + Sync,
+{
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    match orientation {
+        Orientation::Normal | Orientation::Unknown => src.clone(),
+        Orientation::HorizontalFlip => remap(src, w, h, |x, y| (w - 1 - x, y)),
+        Orientation::Rotate180 => remap(src, w, h, |x, y| (w - 1 - x, h - 1 - y)),
+        Orientation::VerticalFlip => remap(src, w, h, |x, y| (x, h - 1 - y)),
+        Orientation::Transpose => remap(src, h, w, |x, y| (y, x)),
+        Orientation::Rotate90 => remap(src, h, w, |x, y| (y, h - 1 - x)),
+        Orientation::Transverse => remap(src, h, w, |x, y| (w - 1 - y, h - 1 - x)),
+        Orientation::Rotate270 => remap(src, h, w, |x, y| (w - 1 - y, x)),
+    }
+}
+
+/// An `out_w` x `out_h` image whose pixel (x, y) is the source pixel at `source(x, y)`.
+fn remap<P>(
+    src: &ImageBuffer<P, Vec<P::Subpixel>>,
+    out_w: usize,
+    out_h: usize,
+    source: impl Fn(usize, usize) -> (usize, usize) + Sync,
+) -> ImageBuffer<P, Vec<P::Subpixel>>
+where
+    P: Pixel + Send + Sync,
+    P::Subpixel: Send + Sync,
+{
+    if out_w == 0 || out_h == 0 {
+        return ImageBuffer::new(out_w as u32, out_h as u32);
+    }
+    let channels = P::CHANNEL_COUNT as usize;
+    let data = src.as_raw();
+    let src_w = src.width() as usize;
+    let mut out = vec![<P::Subpixel as Primitive>::DEFAULT_MIN_VALUE; out_w * out_h * channels];
+    out.par_chunks_mut(out_w * channels)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, pixel) in row.chunks_exact_mut(channels).enumerate() {
+                let (sx, sy) = source(x, y);
+                let start = (sy * src_w + sx) * channels;
+                pixel.copy_from_slice(&data[start..start + channels]);
+            }
+        });
+    ImageBuffer::from_raw(out_w as u32, out_h as u32, out)
+        .expect("output buffer matches its dimensions")
 }
 
 pub fn apply_geometry_warp<'a>(
@@ -3484,4 +3556,81 @@ pub fn calculate_auto_adjustments(
     let results = perform_auto_analysis(&original_image);
 
     Ok(auto_results_to_json(&results))
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+    use image::{Luma, LumaA, Rgb};
+
+    const ORIENTATIONS: [Orientation; 9] = [
+        Orientation::Normal,
+        Orientation::HorizontalFlip,
+        Orientation::Rotate180,
+        Orientation::VerticalFlip,
+        Orientation::Transpose,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+        Orientation::Rotate270,
+        Orientation::Unknown,
+    ];
+
+    fn assert_matches_image_crate(image: DynamicImage) {
+        for orientation in ORIENTATIONS {
+            let expected = orient_with_image_crate(image.clone(), orientation);
+            let actual = apply_orientation(image.clone(), orientation);
+            assert_eq!(expected.color(), actual.color(), "{orientation:?}");
+            assert_eq!(
+                expected.dimensions(),
+                actual.dimensions(),
+                "{orientation:?}"
+            );
+            assert_eq!(expected.as_bytes(), actual.as_bytes(), "{orientation:?}");
+        }
+    }
+
+    #[test]
+    fn orientation_matches_image_crate_for_float_images() {
+        let value = |x: u32, y: u32, c: u32| (x * 131 + y * 17 + c) as f32 * 0.37 - 5.0;
+        assert_matches_image_crate(DynamicImage::ImageRgba32F(ImageBuffer::from_fn(
+            7,
+            5,
+            |x, y| Rgba([value(x, y, 0), value(x, y, 1), f32::NAN, -0.0]),
+        )));
+        assert_matches_image_crate(DynamicImage::ImageRgb32F(ImageBuffer::from_fn(
+            4,
+            9,
+            |x, y| Rgb([value(x, y, 0), value(x, y, 1), value(x, y, 2)]),
+        )));
+    }
+
+    #[test]
+    fn orientation_matches_image_crate_for_integer_images() {
+        assert_matches_image_crate(DynamicImage::ImageRgb8(ImageBuffer::from_fn(
+            5,
+            3,
+            |x, y| Rgb([(x * 40) as u8, (y * 70) as u8, (x + y) as u8]),
+        )));
+        assert_matches_image_crate(DynamicImage::ImageLumaA8(ImageBuffer::from_fn(
+            6,
+            2,
+            |x, y| LumaA([(x * y) as u8, x as u8]),
+        )));
+        assert_matches_image_crate(DynamicImage::ImageLuma16(ImageBuffer::from_fn(
+            3,
+            8,
+            |x, y| Luma([(x * 5000 + y * 7) as u16]),
+        )));
+        assert_matches_image_crate(DynamicImage::ImageRgba16(ImageBuffer::from_fn(
+            1,
+            1,
+            |_, _| Rgba([1, 2, 3, 4]),
+        )));
+    }
+
+    #[test]
+    fn orientation_handles_empty_images() {
+        assert_matches_image_crate(DynamicImage::ImageRgba32F(ImageBuffer::new(0, 4)));
+        assert_matches_image_crate(DynamicImage::ImageRgb8(ImageBuffer::new(3, 0)));
+    }
 }
