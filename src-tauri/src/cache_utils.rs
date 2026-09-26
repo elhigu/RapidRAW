@@ -1,9 +1,12 @@
 use crate::AppState;
+use crate::app_settings::AppSettings;
 use image::DynamicImage;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::SystemTime;
 
 pub const GEOMETRY_KEYS: &[&str] = &[
     "transformDistortion",
@@ -240,9 +243,51 @@ pub fn calculate_full_job_hash(path: &str, adjustments: &serde_json::Value) -> u
     hasher.finish()
 }
 
+/// A path alone goes stale: tethering reuses file names and raw settings change the pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodeFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+    settings_hash: u64,
+}
+
+impl DecodeFingerprint {
+    pub fn for_file(path: &Path, settings: &AppSettings) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let mut hasher = DefaultHasher::new();
+        settings
+            .raw_highlight_compression
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings.linear_raw_mode.hash(&mut hasher);
+        settings
+            .raw_preprocessing_color_nr
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings
+            .raw_preprocessing_sharpening
+            .map(f32::to_bits)
+            .hash(&mut hasher);
+        settings.apply_preprocessing_to_non_raws.hash(&mut hasher);
+        settings.use_apple_raw9.hash(&mut hasher);
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            settings_hash: hasher.finish(),
+        })
+    }
+}
+
+struct DecodedEntry {
+    path: String,
+    fingerprint: DecodeFingerprint,
+    image: Arc<DynamicImage>,
+    exif: HashMap<String, String>,
+}
+
 pub struct DecodedImageCache {
     capacity: usize,
-    items: Vec<(String, Arc<DynamicImage>, HashMap<String, String>)>,
+    items: Vec<DecodedEntry>,
 }
 
 impl DecodedImageCache {
@@ -260,15 +305,19 @@ impl DecodedImageCache {
         }
     }
 
-    pub fn get(&mut self, path: &str) -> Option<(Arc<DynamicImage>, HashMap<String, String>)> {
-        if let Some(pos) = self.items.iter().position(|(p, _, _)| p == path) {
-            let item = self.items.remove(pos);
-            let result = (item.1.clone(), item.2.clone());
-            self.items.push(item);
-            Some(result)
-        } else {
-            None
+    pub fn get(
+        &mut self,
+        path: &str,
+        fingerprint: &DecodeFingerprint,
+    ) -> Option<(Arc<DynamicImage>, HashMap<String, String>)> {
+        let pos = self.items.iter().position(|e| e.path == path)?;
+        let entry = self.items.remove(pos);
+        if entry.fingerprint != *fingerprint {
+            return None;
         }
+        let result = (entry.image.clone(), entry.exif.clone());
+        self.items.push(entry);
+        Some(result)
     }
 
     pub fn clear(&mut self) {
@@ -278,15 +327,82 @@ impl DecodedImageCache {
     pub fn insert(
         &mut self,
         path: String,
+        fingerprint: DecodeFingerprint,
         image: Arc<DynamicImage>,
         exif: HashMap<String, String>,
     ) {
-        if let Some(pos) = self.items.iter().position(|(p, _, _)| *p == path) {
+        if let Some(pos) = self.items.iter().position(|e| e.path == path) {
             self.items.remove(pos);
         } else if self.items.len() >= self.capacity {
             self.items.remove(0);
         }
-        self.items.push((path, image, exif));
+        self.items.push(DecodedEntry {
+            path,
+            fingerprint,
+            image,
+            exif,
+        });
+    }
+}
+
+/// Lets concurrent callers share one decode of a file instead of each decoding it.
+#[derive(Default)]
+pub struct DecodeFlights {
+    inflight: Mutex<HashMap<String, Arc<Flight>>>,
+}
+
+#[derive(Default)]
+pub struct Flight {
+    done: Mutex<bool>,
+    finished: Condvar,
+}
+
+impl Flight {
+    pub fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while !*done {
+            done = self.finished.wait(done).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+pub enum FlightRole<'a> {
+    Leader(FlightGuard<'a>),
+    Follower(Arc<Flight>),
+}
+
+/// Wakes waiters when dropped, including on error or panic.
+pub struct FlightGuard<'a> {
+    flights: &'a DecodeFlights,
+    path: String,
+    flight: Arc<Flight>,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights
+            .inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.path);
+        *self.flight.done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.flight.finished.notify_all();
+    }
+}
+
+impl DecodeFlights {
+    pub fn begin(&self, path: &str) -> FlightRole<'_> {
+        let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = inflight.get(path) {
+            return FlightRole::Follower(Arc::clone(flight));
+        }
+        let flight = Arc::new(Flight::default());
+        inflight.insert(path.to_string(), Arc::clone(&flight));
+        FlightRole::Leader(FlightGuard {
+            flights: self,
+            path: path.to_string(),
+            flight,
+        })
     }
 }
 
@@ -322,5 +438,137 @@ pub fn clear_session_caches(state: tauri::State<AppState>) {
     }
     if let Ok(mut geometry_cache) = state.geometry_cache.lock() {
         geometry_cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::time::Duration;
+
+    fn image(value: u8) -> Arc<DynamicImage> {
+        Arc::new(DynamicImage::ImageLuma8(image::ImageBuffer::from_pixel(
+            2,
+            2,
+            image::Luma([value]),
+        )))
+    }
+
+    fn file_with(contents: &[u8]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(contents).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn fingerprint_changes_when_file_is_rewritten() {
+        let settings = AppSettings::default();
+        let file = file_with(b"first capture");
+        let before = DecodeFingerprint::for_file(file.path(), &settings).unwrap();
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(file.path(), b"second capture, same name").unwrap();
+        let after = DecodeFingerprint::for_file(file.path(), &settings).unwrap();
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_decode_settings() {
+        let file = file_with(b"raw");
+        let mut settings = AppSettings::default();
+        let base = DecodeFingerprint::for_file(file.path(), &settings).unwrap();
+
+        settings.linear_raw_mode = format!("{}-changed", settings.linear_raw_mode);
+        assert_ne!(
+            base,
+            DecodeFingerprint::for_file(file.path(), &settings).unwrap()
+        );
+
+        let settings = AppSettings {
+            raw_preprocessing_sharpening: Some(0.9),
+            ..Default::default()
+        };
+        assert_ne!(
+            base,
+            DecodeFingerprint::for_file(file.path(), &settings).unwrap()
+        );
+
+        let unchanged = DecodeFingerprint::for_file(file.path(), &AppSettings::default()).unwrap();
+        assert_eq!(base, unchanged);
+    }
+
+    #[test]
+    fn stale_entry_is_dropped_instead_of_returned() {
+        let settings = AppSettings::default();
+        let file = file_with(b"old");
+        let old = DecodeFingerprint::for_file(file.path(), &settings).unwrap();
+        let mut cache = DecodedImageCache::new(3);
+        cache.insert("a".into(), old.clone(), image(1), HashMap::new());
+        assert!(cache.get("a", &old).is_some());
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(file.path(), b"new contents").unwrap();
+        let new = DecodeFingerprint::for_file(file.path(), &settings).unwrap();
+
+        assert!(cache.get("a", &new).is_none());
+        assert!(
+            cache.get("a", &old).is_none(),
+            "stale entry must be evicted"
+        );
+    }
+
+    #[test]
+    fn least_recently_used_entry_is_evicted() {
+        let file = file_with(b"x");
+        let fp = DecodeFingerprint::for_file(file.path(), &AppSettings::default()).unwrap();
+        let mut cache = DecodedImageCache::new(2);
+        cache.insert("a".into(), fp.clone(), image(1), HashMap::new());
+        cache.insert("b".into(), fp.clone(), image(2), HashMap::new());
+        cache.get("a", &fp);
+        cache.insert("c".into(), fp.clone(), image(3), HashMap::new());
+
+        assert!(cache.get("b", &fp).is_none());
+        assert!(cache.get("a", &fp).is_some());
+        assert!(cache.get("c", &fp).is_some());
+    }
+
+    #[test]
+    fn concurrent_decodes_of_one_file_run_once() {
+        let flights = Arc::new(DecodeFlights::default());
+        let extra_leaders = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registered = Arc::new(std::sync::Barrier::new(5));
+        let leader = match flights.begin("a") {
+            FlightRole::Leader(guard) => guard,
+            FlightRole::Follower(_) => panic!("first caller must lead"),
+        };
+
+        let waiters: Vec<_> = (0..4)
+            .map(|_| {
+                let flights = Arc::clone(&flights);
+                let extra_leaders = Arc::clone(&extra_leaders);
+                let registered = Arc::clone(&registered);
+                std::thread::spawn(move || {
+                    let role = flights.begin("a");
+                    registered.wait();
+                    match role {
+                        FlightRole::Follower(flight) => flight.wait(),
+                        FlightRole::Leader(_) => {
+                            extra_leaders.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                })
+            })
+            .collect();
+        registered.wait();
+        drop(leader);
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+
+        assert_eq!(extra_leaders.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(matches!(flights.begin("a"), FlightRole::Leader(_)));
     }
 }

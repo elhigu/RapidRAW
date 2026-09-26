@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use wgpu::{Texture, TextureView};
 
 use crate::ai_processing::AiState;
-use crate::cache_utils::DecodedImageCache;
+use crate::cache_utils::{DecodeFlights, DecodedImageCache};
 use crate::camera_tethering::CameraSession;
 use crate::gpu_processing::GpuProcessor;
 use crate::image_processing::GpuContext;
@@ -244,6 +244,7 @@ pub struct AppState {
     pub patched_warped_cache: Mutex<Option<(u64, Arc<DynamicImage>)>>,
     pub full_transformed_cache: Mutex<Option<TransformedImageCache>>,
     pub decoded_image_cache: Mutex<DecodedImageCache>,
+    pub decode_flights: DecodeFlights,
     pub thumbnail_manager: Arc<ThumbnailManager>,
     pub metadata_manager: Arc<MetadataManager>,
     pub disks_cache: Mutex<Option<Disks>>,
