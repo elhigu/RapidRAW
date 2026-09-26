@@ -2589,28 +2589,41 @@ pub fn remove_raw_artifacts_and_enhance(
     color_nr_inv_sigma: f32,
     sharpening_amount: f32,
 ) {
-    let convert_span = crate::perf_trace::span("enhance.to_rgb32f");
-    let mut buffer = to_rgb32f_parallel(image);
-    drop(convert_span);
-    let w = buffer.width() as usize;
-    let h = buffer.height() as usize;
+    let (width, height) = image.dimensions();
+    let w = width as usize;
+    let h = height as usize;
+    let converted = match &*image {
+        DynamicImage::ImageRgba32F(_) | DynamicImage::ImageRgb32F(_) => None,
+        other => Some(other.to_rgb32f()),
+    };
 
     let ycc_span = crate::perf_trace::span("enhance.ycbcr");
+    let (src, channels): (&[f32], usize) = match (&converted, &*image) {
+        (Some(rgb), _) => (rgb.as_raw(), 3),
+        (None, DynamicImage::ImageRgba32F(rgba)) => (rgba.as_raw(), 4),
+        (None, DynamicImage::ImageRgb32F(rgb)) => (rgb.as_raw(), 3),
+        (None, _) => unreachable!("other formats are converted above"),
+    };
     let mut ycbcr_buffer = vec![0.0f32; w * h * 3];
-
-    let src = buffer.as_raw();
-
     ycbcr_buffer
         .par_chunks_mut(3)
-        .zip(src.par_chunks(3))
+        .zip(src.par_chunks(channels))
         .for_each(|(dest, pixel)| {
             let (y, cb, cr) = rgb_to_yc_only(pixel[0], pixel[1], pixel[2]);
             dest[0] = y;
             dest[1] = cb;
             dest[2] = cr;
         });
-
     drop(ycc_span);
+
+    // Colour noise reduction writes every output pixel, so it doesn't need a copy of the image.
+    let convert_span = crate::perf_trace::span("enhance.to_rgb32f");
+    let mut buffer: Rgb32FImage = if color_nr_inv_sigma > 0.0 {
+        Rgb32FImage::new(width, height)
+    } else {
+        converted.unwrap_or_else(|| to_rgb32f_parallel(image))
+    };
+    drop(convert_span);
     if color_nr_inv_sigma > 0.0 {
         let _nr_span = crate::perf_trace::span("enhance.color_nr");
         let base_inv_sigma = color_nr_inv_sigma;
@@ -3528,6 +3541,32 @@ mod tests {
             image.to_rgb32f().as_raw(),
             to_rgb32f_parallel(&image).as_raw(),
         );
+    }
+
+    #[test]
+    fn enhance_gives_the_same_result_for_rgba_and_rgb_input() {
+        let values: Vec<f32> = sample_values((W * H * 4) as usize)
+            .into_iter()
+            .map(|v| {
+                if v.is_finite() {
+                    v.clamp(0.0, 4.0)
+                } else {
+                    0.5
+                }
+            })
+            .collect();
+        let rgba = DynamicImage::ImageRgba32F(ImageBuffer::from_raw(W, H, values).unwrap());
+        let rgb = DynamicImage::ImageRgb32F(rgba.to_rgb32f());
+        for (color_nr, sharpening) in [(0.0, 0.0), (2.0, 0.0), (0.0, 0.35), (2.0, 0.35)] {
+            let mut from_rgba = rgba.clone();
+            let mut from_rgb = rgb.clone();
+            remove_raw_artifacts_and_enhance(&mut from_rgba, color_nr, sharpening);
+            remove_raw_artifacts_and_enhance(&mut from_rgb, color_nr, sharpening);
+            assert_bits_eq(
+                from_rgb.as_rgb32f().unwrap().as_raw(),
+                from_rgba.as_rgb32f().unwrap().as_raw(),
+            );
+        }
     }
 
     #[test]
