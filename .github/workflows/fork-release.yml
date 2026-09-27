@@ -1,9 +1,20 @@
 name: 'Fork release: Linux builds'
 
 # This fork publishes Linux builds only. Upstream's release workflow is disabled on the fork.
+# Draft releases don't trigger workflows, so a draft's assets are built by running this manually.
 on:
   release:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      release-id:
+        description: 'ID of the (draft) release to upload to'
+        required: true
+        type: string
+      tag:
+        description: 'Tag to build'
+        required: true
+        type: string
 
 jobs:
   release:
@@ -27,7 +38,8 @@ jobs:
             asset-prefix: '03_tethering'
     uses: ./.github/workflows/build.yml
     with:
-      release-id: ${{ github.event.release.id }}
+      release-id: ${{ inputs.release-id || github.event.release.id }}
+      ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
       platform: ${{ matrix.platform }}
       target: ''
       build-args: ${{ matrix.args }}
