@@ -228,7 +228,18 @@ fn compute_full_transformed_res(
         adjustments,
     );
 
-    Ok((Arc::new(transformed_img.into_owned()), offset))
+    Ok((share_if_unchanged(transformed_img, &warped_arc), offset))
+}
+
+/// Shares `source` when `image` still borrows it, instead of copying a full-resolution image.
+fn share_if_unchanged(
+    image: Cow<'_, DynamicImage>,
+    source: &Arc<DynamicImage>,
+) -> Arc<DynamicImage> {
+    match image {
+        Cow::Borrowed(image) if std::ptr::eq(image, source.as_ref()) => Arc::clone(source),
+        other => Arc::new(other.into_owned()),
+    }
 }
 
 fn compute_patched_and_warped(
@@ -252,7 +263,7 @@ fn compute_patched_and_warped(
     let warped = apply_geometry_warp(patched_image, adjustments);
     let blurred = crate::lens_blur::apply_lens_blur(warped, adjustments);
 
-    Ok(Arc::new(blurred.into_owned()))
+    Ok(share_if_unchanged(blurred, &loaded_image.image))
 }
 
 #[tauri::command]
@@ -2319,4 +2330,24 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod share_if_unchanged_tests {
+    use super::*;
+
+    #[test]
+    fn shares_only_an_unchanged_borrow_of_the_source() {
+        let source = Arc::new(DynamicImage::new_rgb32f(4, 3));
+        let other = DynamicImage::new_rgb32f(4, 3);
+
+        let shared = share_if_unchanged(Cow::Borrowed(source.as_ref()), &source);
+        assert!(Arc::ptr_eq(&shared, &source));
+
+        let copied = share_if_unchanged(Cow::Borrowed(&other), &source);
+        assert!(!Arc::ptr_eq(&copied, &source));
+
+        let owned = share_if_unchanged(Cow::Owned(other.clone()), &source);
+        assert!(!Arc::ptr_eq(&owned, &source));
+    }
 }
