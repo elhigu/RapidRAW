@@ -2580,6 +2580,14 @@ fn to_rgb32f_parallel(image: &DynamicImage) -> image::Rgb32FImage {
                 .for_each(|(dst, src)| dst.copy_from_slice(&src[..3]));
             image::ImageBuffer::from_raw(w, h, rgb).expect("RGB buffer matches image dimensions")
         }
+        DynamicImage::ImageRgb32F(rgb) => {
+            let mut copy = vec![0.0f32; rgb.as_raw().len()];
+            copy.par_chunks_mut(1 << 16)
+                .zip(rgb.as_raw().par_chunks(1 << 16))
+                .for_each(|(dst, src)| dst.copy_from_slice(src));
+            image::ImageBuffer::from_raw(rgb.width(), rgb.height(), copy)
+                .expect("RGB buffer matches image dimensions")
+        }
         other => other.to_rgb32f(),
     }
 }
@@ -3540,6 +3548,9 @@ mod tests {
                 Rgba([(x * 997) as u16, (y * 1553) as u16, 40000, (x * y) as u16])
             })),
             DynamicImage::ImageLuma8(ImageBuffer::from_fn(W, H, |x, y| Luma([(x ^ y) as u8]))),
+            DynamicImage::ImageRgb32F(
+                ImageBuffer::from_raw(W, H, sample_values((W * H * 3) as usize)).unwrap(),
+            ),
         ];
         for image in images {
             assert_bits_eq(

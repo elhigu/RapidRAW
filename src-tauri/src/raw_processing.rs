@@ -1,6 +1,6 @@
 use crate::image_processing::apply_orientation;
 use anyhow::{Result, anyhow};
-use image::{DynamicImage, ImageBuffer, Rgba};
+use image::{DynamicImage, ImageBuffer, Rgb32FImage};
 use rawler::{
     decoders::{Orientation, RawDecodeParams},
     imgop::develop::{DemosaicAlgorithm, Intermediate, ProcessingStep, RawDevelop},
@@ -256,13 +256,13 @@ fn develop_internal(
     drop(post_span);
     check_cancel()?;
 
-    let _convert_span = crate::perf_trace::span("decode.to_rgba32f");
+    let _convert_span = crate::perf_trace::span("decode.to_rgb32f");
     let dynamic_image = match developed_intermediate {
         Intermediate::ThreeColor(pixels) => {
-            DynamicImage::ImageRgba32F(rgb_pixels_to_rgba(&pixels.data, width, height)?)
+            DynamicImage::ImageRgb32F(rgb_pixels_to_image(pixels.data, width, height)?)
         }
         Intermediate::Monochrome(pixels) => {
-            DynamicImage::ImageRgba32F(mono_pixels_to_rgba(&pixels.data, width, height)?)
+            DynamicImage::ImageRgb32F(mono_pixels_to_rgb(&pixels.data, width, height)?)
         }
         _ => {
             return Err(anyhow!("Unsupported intermediate format for conversion"));
@@ -272,29 +272,18 @@ fn develop_internal(
     Ok((dynamic_image, orientation))
 }
 
-fn rgb_pixels_to_rgba(
-    data: &[[f32; 3]],
-    width: u32,
-    height: u32,
-) -> Result<ImageBuffer<Rgba<f32>, Vec<f32>>> {
-    let mut rgba = vec![0.0f32; data.len() * 4];
-    rgba.par_chunks_exact_mut(4)
-        .zip(data.par_iter())
-        .for_each(|(dst, p)| dst.copy_from_slice(&[p[0], p[1], p[2], 1.0]));
-    ImageBuffer::from_raw(width, height, rgba)
+/// Reuses the developed pixels as the image buffer; `[f32; 3]` is laid out as three `f32`s.
+fn rgb_pixels_to_image(data: Vec<[f32; 3]>, width: u32, height: u32) -> Result<Rgb32FImage> {
+    ImageBuffer::from_raw(width, height, data.into_flattened())
         .ok_or_else(|| anyhow!("Developed image size does not match its dimensions"))
 }
 
-fn mono_pixels_to_rgba(
-    data: &[f32],
-    width: u32,
-    height: u32,
-) -> Result<ImageBuffer<Rgba<f32>, Vec<f32>>> {
-    let mut rgba = vec![0.0f32; data.len() * 4];
-    rgba.par_chunks_exact_mut(4)
+fn mono_pixels_to_rgb(data: &[f32], width: u32, height: u32) -> Result<Rgb32FImage> {
+    let mut rgb = vec![0.0f32; data.len() * 3];
+    rgb.par_chunks_exact_mut(3)
         .zip(data.par_iter())
-        .for_each(|(dst, &p)| dst.copy_from_slice(&[p, p, p, 1.0]));
-    ImageBuffer::from_raw(width, height, rgba)
+        .for_each(|(dst, &p)| dst.copy_from_slice(&[p, p, p]));
+    ImageBuffer::from_raw(width, height, rgb)
         .ok_or_else(|| anyhow!("Developed image size does not match its dimensions"))
 }
 
@@ -325,33 +314,32 @@ pub fn get_fast_demosaic_scale_factor(
 mod tests {
     use super::*;
     use crate::test_support::{assert_bits_eq, sample_values};
+    use image::Rgb;
 
     const W: u32 = 37;
     const H: u32 = 23;
 
     #[test]
-    fn rgb_pixels_to_rgba_matches_serial_conversion() {
+    fn rgb_pixels_to_image_keeps_every_value() {
         let values = sample_values((W * H * 3) as usize);
         let data: Vec<[f32; 3]> = values.as_chunks::<3>().0.to_vec();
-        let expected = ImageBuffer::<Rgba<f32>, _>::from_fn(W, H, |x, y| {
-            let p = data[(y * W + x) as usize];
-            Rgba([p[0], p[1], p[2], 1.0])
-        });
+        let expected =
+            ImageBuffer::<Rgb<f32>, _>::from_fn(W, H, |x, y| Rgb(data[(y * W + x) as usize]));
 
-        let actual = rgb_pixels_to_rgba(&data, W, H).unwrap();
+        let actual = rgb_pixels_to_image(data, W, H).unwrap();
 
         assert_bits_eq(expected.as_raw(), actual.as_raw());
     }
 
     #[test]
-    fn mono_pixels_to_rgba_matches_serial_conversion() {
+    fn mono_pixels_to_rgb_matches_serial_conversion() {
         let data = sample_values((W * H) as usize);
-        let expected = ImageBuffer::<Rgba<f32>, _>::from_fn(W, H, |x, y| {
+        let expected = ImageBuffer::<Rgb<f32>, _>::from_fn(W, H, |x, y| {
             let p = data[(y * W + x) as usize];
-            Rgba([p, p, p, 1.0])
+            Rgb([p, p, p])
         });
 
-        let actual = mono_pixels_to_rgba(&data, W, H).unwrap();
+        let actual = mono_pixels_to_rgb(&data, W, H).unwrap();
 
         assert_bits_eq(expected.as_raw(), actual.as_raw());
     }
@@ -359,7 +347,7 @@ mod tests {
     #[test]
     fn pixel_conversion_rejects_mismatched_dimensions() {
         let data = vec![[0.0f32; 3]; (W * H) as usize];
-        assert!(rgb_pixels_to_rgba(&data, W + 1, H).is_err());
-        assert!(mono_pixels_to_rgba(&vec![0.0; (W * H) as usize], W, H + 1).is_err());
+        assert!(rgb_pixels_to_image(data, W + 1, H).is_err());
+        assert!(mono_pixels_to_rgb(&vec![0.0; (W * H) as usize], W, H + 1).is_err());
     }
 }
