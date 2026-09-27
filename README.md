@@ -13,6 +13,8 @@ On the laptop above, opening a 12 MP raw went from 6.4 s to about 0.4 s, and exp
 - **Reliable decoded-image cache:** a cached decode is reused only while the file and the raw processing settings are unchanged, which fixes stale previews for tethered shots that reuse file names. Full-resolution previews in the culling view, negative conversion and collage now reuse it: 394 ms → 153 ms for a 12 MP raw.
 - **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Decoding the next photo when you open it: 247 ms → 0.3 ms. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
 - **GPU pipelines compiled once:** shaders are compiled once per GPU instead of for every image processor, and the 16-bit export pipeline only when it is needed. Creating a processor: 16 ms → 10 ms.
+- **Live slider previews in the culling view:** dragging a slider updates the photo continuously, as in the editor, instead of only after release. After release the photo shows the change in about 0.15 s instead of about 0.5 s, and the full-resolution render waits until no slider is being dragged. On Windows and macOS this applies when the wgpu renderer is turned off.
+- **No hidden renders behind the editor:** with the library in culling mode, the hidden culling view re-rendered the photo at full resolution after every edit in the editor, about 0.6 s of GPU work per edit for a 26 MP raw. It now waits until the library is shown again.
 
 Tools added for this work:
 
