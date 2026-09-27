@@ -1,5 +1,5 @@
 > [!NOTE]
-> **About this fork:** it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: rendered and exported images were checked to be byte-identical to upstream. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
+> **About this fork:** it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
 
 ## Performance fixes in this fork
 
@@ -9,12 +9,19 @@ On the laptop above, opening a 12 MP raw went from 6.4 s to about 0.4 s, and exp
 - **Parallel raw post-processing:** highlight recovery and pixel format conversions use all CPU cores. Opening a 12 MP raw: 0.89 s → 0.40 s.
 - **Vectorized raw enhancement:** colour noise reduction and detail enhancement process eight pixels at a time, with AVX2 when the CPU supports it. Raw enhancement of a 26 MP raw: ~260 ms → ~94 ms.
 - **Fewer full-image copies in raw enhancement:** ~230 ms → ~170–200 ms for a 26 MP raw.
+- **Raws decoded straight to RGB:** the decoded raw was converted to RGBA and back to RGB. Skipping that saves ~50 ms per 26 MP raw.
 - **Parallel rotation and flipping:** rotating a 26 MP portrait photo: 97 ms → 40 ms.
 - **Reliable decoded-image cache:** a cached decode is reused only while the file and the raw processing settings are unchanged, which fixes stale previews for tethered shots that reuse file names. Full-resolution previews in the culling view, negative conversion and collage now reuse it: 394 ms → 153 ms for a 12 MP raw.
 - **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Decoding the next photo when you open it: 247 ms → 0.3 ms. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
 - **GPU pipelines compiled once:** shaders are compiled once per GPU instead of for every image processor, and the 16-bit export pipeline only when it is needed. Creating a processor: 16 ms → 10 ms.
+- **Unused blurs skipped:** every render computed four blurs on the GPU, the largest with a 40-pixel radius, even when no adjustment used them. Only the ones in use are computed now. Full-resolution render of a 26 MP raw without structure, glow or dehaze: ~680 ms → ~360 ms. Slider update: ~33 ms → ~22 ms.
+- **Previews encoded in parallel:** preview JPEGs are encoded in strips on all CPU cores and joined with restart markers. Full-resolution preview of a 26 MP raw: ~374 ms → ~165 ms. Slider update: ~21 ms → ~12 ms.
+- **One GPU processor for portrait and landscape:** alternating between portrait and landscape photos no longer rebuilds the GPU processor and its full-size textures on every switch.
+- **No copies of untransformed images:** without crop, rotation, perspective or lens correction, the editor no longer copies the full image twice. First editor frame of a 26 MP raw: ~210 ms → ~60 ms.
+- **Faster geometry steps:** lens correction, perspective, rotation and crop copy less and use all CPU cores. With a perspective correction on a 26 MP raw, the full-resolution transform: ~110–210 ms → ~80–135 ms.
 - **Live slider previews in the culling view:** dragging a slider updates the photo continuously, as in the editor, instead of only after release. After release the photo shows the change in about 0.15 s instead of about 0.5 s, and the full-resolution render waits until no slider is being dragged. On Windows and macOS this applies when the wgpu renderer is turned off.
 - **No hidden renders behind the editor:** with the library in culling mode, the hidden culling view re-rendered the photo at full resolution after every edit in the editor, about 0.6 s of GPU work per edit for a 26 MP raw. It now waits until the library is shown again.
+- **Culling view shows the editor's render while loading:** moving to a photo that wasn't preloaded shows its screen-sized editor render as soon as the raw is decoded, instead of only the thumbnail until the full-resolution preview arrives.
 
 Tools added for this work:
 
