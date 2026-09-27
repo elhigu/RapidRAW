@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec2, Vec3};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Pixel, Primitive, Rgb32FImage, Rgba};
 use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_center};
+use multiversion::multiversion;
 use nalgebra::{Matrix3 as NaMatrix3, Vector3 as NaVector3};
 use rawler::decoders::Orientation;
 use rayon::prelude::*;
@@ -2657,6 +2658,26 @@ fn to_rgb32f_parallel(image: &DynamicImage) -> image::Rgb32FImage {
     }
 }
 
+/// Pixels filtered together, so the compiler can keep each value of a group in one SIMD register.
+const LANES: usize = 8;
+const NR_OFFSETS: [isize; 3] = [-5, -1, 3];
+const NR_OFFSET_SQUARES: [f32; 3] = [25.0, 1.0, 9.0];
+const NR_REACH_BEFORE: usize = NR_OFFSETS[0].unsigned_abs();
+const NR_REACH_AFTER: usize = NR_OFFSETS[2].unsigned_abs();
+const DETAIL_RADIUS: usize = 2;
+const DETAIL_TAPS: usize = 2 * DETAIL_RADIUS + 1;
+
+struct YccPlanes {
+    y: Vec<f32>,
+    cb: Vec<f32>,
+    cr: Vec<f32>,
+}
+
+#[inline(always)]
+fn lanes(values: &[f32], start: usize) -> [f32; LANES] {
+    values[start..start + LANES].try_into().unwrap()
+}
+
 pub fn remove_raw_artifacts_and_enhance(
     image: &mut DynamicImage,
     color_nr_inv_sigma: f32,
@@ -2665,6 +2686,10 @@ pub fn remove_raw_artifacts_and_enhance(
     let (width, height) = image.dimensions();
     let w = width as usize;
     let h = height as usize;
+    if w == 0 || h == 0 {
+        *image = DynamicImage::ImageRgb32F(image.to_rgb32f());
+        return;
+    }
     let converted = match &*image {
         DynamicImage::ImageRgba32F(_) | DynamicImage::ImageRgb32F(_) => None,
         other => Some(other.to_rgb32f()),
@@ -2677,15 +2702,23 @@ pub fn remove_raw_artifacts_and_enhance(
         (None, DynamicImage::ImageRgb32F(rgb)) => (rgb.as_raw(), 3),
         (None, _) => unreachable!("other formats are converted above"),
     };
-    let mut ycbcr_buffer = vec![0.0f32; w * h * 3];
-    ycbcr_buffer
-        .par_chunks_mut(3)
-        .zip(src.par_chunks(channels))
-        .for_each(|(dest, pixel)| {
-            let (y, cb, cr) = rgb_to_yc_only(pixel[0], pixel[1], pixel[2]);
-            dest[0] = y;
-            dest[1] = cb;
-            dest[2] = cr;
+    let mut ycc = YccPlanes {
+        y: vec![0.0; w * h],
+        cb: vec![0.0; w * h],
+        cr: vec![0.0; w * h],
+    };
+    ycc.y
+        .par_chunks_mut(w)
+        .zip(ycc.cb.par_chunks_mut(w))
+        .zip(ycc.cr.par_chunks_mut(w))
+        .zip(src.par_chunks(w * channels))
+        .for_each(|(((y_row, cb_row), cr_row), src_row)| {
+            for (x, pixel) in src_row.chunks_exact(channels).enumerate() {
+                let (y, cb, cr) = rgb_to_yc_only(pixel[0], pixel[1], pixel[2]);
+                y_row[x] = y;
+                cb_row[x] = cb;
+                cr_row[x] = cr;
+            }
         });
     drop(ycc_span);
 
@@ -2699,124 +2732,186 @@ pub fn remove_raw_artifacts_and_enhance(
     drop(convert_span);
     if color_nr_inv_sigma > 0.0 {
         let _nr_span = crate::perf_trace::span("enhance.color_nr");
-        let base_inv_sigma = color_nr_inv_sigma;
-        const OFFSETS: [isize; 3] = [-5, -1, 3];
-        const OFFSET_SQUARES: [f32; 3] = [25.0, 1.0, 9.0];
-
         buffer
             .par_chunks_mut(w * 3)
             .enumerate()
-            .for_each(|(y, row)| {
-                let row_offset = y * w;
-                let h_isize = h as isize;
-                let w_isize = w as isize;
-                let y_isize = y as isize;
-
-                for x in 0..w {
-                    let center_idx = (row_offset + x) * 3;
-
-                    let cy = ycbcr_buffer[center_idx];
-                    let ccb = ycbcr_buffer[center_idx + 1];
-                    let ccr = ycbcr_buffer[center_idx + 2];
-
-                    let mut cb_sum = 0.0;
-                    let mut cr_sum = 0.0;
-                    let mut w_sum = 0.0;
-
-                    for (ki, &ky) in OFFSETS.iter().enumerate() {
-                        let sy = y_isize + ky;
-                        if sy < 0 || sy >= h_isize {
-                            continue;
-                        }
-
-                        let neighbor_row_idx = (sy as usize) * w;
-                        let ky_sq_div_50 = OFFSET_SQUARES[ki] * 0.02;
-
-                        for (kj, &kx) in OFFSETS.iter().enumerate() {
-                            let sx = (x as isize) + kx;
-                            if sx < 0 || sx >= w_isize {
-                                continue;
-                            }
-
-                            let neighbor_idx = (neighbor_row_idx + sx as usize) * 3;
-
-                            let neighbor_y = ycbcr_buffer[neighbor_idx];
-                            let y_diff = (cy - neighbor_y).abs();
-
-                            let val = y_diff * base_inv_sigma;
-                            let spatial_penalty = OFFSET_SQUARES[kj] * 0.02 + ky_sq_div_50;
-
-                            let weight = 1.0 / (1.0 + val * val + spatial_penalty);
-
-                            cb_sum += ycbcr_buffer[neighbor_idx + 1] * weight;
-                            cr_sum += ycbcr_buffer[neighbor_idx + 2] * weight;
-                            w_sum += weight;
-                        }
-                    }
-
-                    let (out_cb, out_cr) = if w_sum > 1e-4 {
-                        let inv_w_sum = 1.0 / w_sum;
-                        let filtered_cb = cb_sum * inv_w_sum;
-                        let filtered_cr = cr_sum * inv_w_sum;
-
-                        let orig_mag_sq = ccb * ccb + ccr * ccr;
-                        let filt_mag_sq = filtered_cb * filtered_cb + filtered_cr * filtered_cr;
-
-                        if filt_mag_sq > orig_mag_sq && orig_mag_sq > 1e-12 {
-                            let scale = (orig_mag_sq / filt_mag_sq).sqrt();
-                            (filtered_cb * scale, filtered_cr * scale)
-                        } else {
-                            (filtered_cb, filtered_cr)
-                        }
-                    } else {
-                        (ccb, ccr)
-                    };
-
-                    let (r, g, b) = yc_to_rgb(cy, out_cb, out_cr);
-
-                    let o = x * 3;
-                    row[o] = r.max(0.0);
-                    row[o + 1] = g.max(0.0);
-                    row[o + 2] = b.max(0.0);
-                }
-            });
+            .for_each(|(y, row)| color_nr_row(&ycc, w, h, y, color_nr_inv_sigma, row));
     }
 
     if sharpening_amount > 0.0 {
         let _span = crate::perf_trace::span("enhance.detail");
-        apply_gentle_detail_enhance(&mut buffer, &ycbcr_buffer, sharpening_amount);
+        apply_gentle_detail_enhance(&mut buffer, &ycc.y, sharpening_amount);
     }
 
     *image = DynamicImage::ImageRgb32F(buffer);
 }
 
+#[multiversion(targets("x86_64+avx+avx2"))]
+fn color_nr_row(ycc: &YccPlanes, w: usize, h: usize, y: usize, inv_sigma: f32, out: &mut [f32]) {
+    let mut x = 0;
+    if y >= NR_REACH_BEFORE && y + NR_REACH_AFTER < h {
+        while x < NR_REACH_BEFORE.min(w) {
+            out[x * 3..x * 3 + 3].copy_from_slice(&color_nr_pixel(ycc, w, h, x, y, inv_sigma));
+            x += 1;
+        }
+        while x + LANES + NR_REACH_AFTER <= w {
+            let group = (&mut out[x * 3..(x + LANES) * 3]).try_into().unwrap();
+            color_nr_lanes(ycc, w, x, y, inv_sigma, group);
+            x += LANES;
+        }
+    }
+    while x < w {
+        out[x * 3..x * 3 + 3].copy_from_slice(&color_nr_pixel(ycc, w, h, x, y, inv_sigma));
+        x += 1;
+    }
+}
+
+#[inline(always)]
+fn color_nr_pixel(
+    ycc: &YccPlanes,
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    inv_sigma: f32,
+) -> [f32; 3] {
+    let center_idx = y * w + x;
+    let cy = ycc.y[center_idx];
+
+    let mut cb_sum = 0.0;
+    let mut cr_sum = 0.0;
+    let mut w_sum = 0.0;
+
+    for (ki, &ky) in NR_OFFSETS.iter().enumerate() {
+        let sy = y as isize + ky;
+        if sy < 0 || sy >= h as isize {
+            continue;
+        }
+
+        let neighbor_row_idx = (sy as usize) * w;
+        let ky_sq_div_50 = NR_OFFSET_SQUARES[ki] * 0.02;
+
+        for (kj, &kx) in NR_OFFSETS.iter().enumerate() {
+            let sx = x as isize + kx;
+            if sx < 0 || sx >= w as isize {
+                continue;
+            }
+
+            let neighbor_idx = neighbor_row_idx + sx as usize;
+            let spatial_penalty = NR_OFFSET_SQUARES[kj] * 0.02 + ky_sq_div_50;
+            let weight = color_nr_weight(cy, ycc.y[neighbor_idx], inv_sigma, spatial_penalty);
+
+            cb_sum += ycc.cb[neighbor_idx] * weight;
+            cr_sum += ycc.cr[neighbor_idx] * weight;
+            w_sum += weight;
+        }
+    }
+
+    color_nr_finish(
+        cy,
+        ycc.cb[center_idx],
+        ycc.cr[center_idx],
+        cb_sum,
+        cr_sum,
+        w_sum,
+    )
+}
+
+/// `color_nr_pixel` for `LANES` pixels whose taps all lie inside the image. Each pixel goes
+/// through the same operations in the same order, so the results are identical.
+#[inline(always)]
+fn color_nr_lanes(
+    ycc: &YccPlanes,
+    w: usize,
+    x: usize,
+    y: usize,
+    inv_sigma: f32,
+    out: &mut [f32; LANES * 3],
+) {
+    let center_idx = y * w + x;
+    let cy = lanes(&ycc.y, center_idx);
+
+    let mut cb_sum = [0.0f32; LANES];
+    let mut cr_sum = [0.0f32; LANES];
+    let mut w_sum = [0.0f32; LANES];
+
+    for (ki, &ky) in NR_OFFSETS.iter().enumerate() {
+        let neighbor_row_idx = y.wrapping_add_signed(ky) * w;
+        let ky_sq_div_50 = NR_OFFSET_SQUARES[ki] * 0.02;
+
+        for (kj, &kx) in NR_OFFSETS.iter().enumerate() {
+            let neighbor_idx = (neighbor_row_idx + x).wrapping_add_signed(kx);
+            let neighbor_y = lanes(&ycc.y, neighbor_idx);
+            let neighbor_cb = lanes(&ycc.cb, neighbor_idx);
+            let neighbor_cr = lanes(&ycc.cr, neighbor_idx);
+            let spatial_penalty = NR_OFFSET_SQUARES[kj] * 0.02 + ky_sq_div_50;
+
+            for i in 0..LANES {
+                let weight = color_nr_weight(cy[i], neighbor_y[i], inv_sigma, spatial_penalty);
+                cb_sum[i] += neighbor_cb[i] * weight;
+                cr_sum[i] += neighbor_cr[i] * weight;
+                w_sum[i] += weight;
+            }
+        }
+    }
+
+    let ccb = lanes(&ycc.cb, center_idx);
+    let ccr = lanes(&ycc.cr, center_idx);
+    for i in 0..LANES {
+        let rgb = color_nr_finish(cy[i], ccb[i], ccr[i], cb_sum[i], cr_sum[i], w_sum[i]);
+        out[i * 3..i * 3 + 3].copy_from_slice(&rgb);
+    }
+}
+
+#[inline(always)]
+fn color_nr_weight(cy: f32, neighbor_y: f32, inv_sigma: f32, spatial_penalty: f32) -> f32 {
+    let y_diff = (cy - neighbor_y).abs();
+    let val = y_diff * inv_sigma;
+    1.0 / (1.0 + val * val + spatial_penalty)
+}
+
+/// Computes every candidate and then selects, so a group of pixels needs no branches.
+#[inline(always)]
+fn color_nr_finish(cy: f32, ccb: f32, ccr: f32, cb_sum: f32, cr_sum: f32, w_sum: f32) -> [f32; 3] {
+    let inv_w_sum = 1.0 / w_sum;
+    let filtered_cb = cb_sum * inv_w_sum;
+    let filtered_cr = cr_sum * inv_w_sum;
+
+    let orig_mag_sq = ccb * ccb + ccr * ccr;
+    let filt_mag_sq = filtered_cb * filtered_cb + filtered_cr * filtered_cr;
+    let scale = (orig_mag_sq / filt_mag_sq).sqrt();
+    let scaled_cb = filtered_cb * scale;
+    let scaled_cr = filtered_cr * scale;
+    let too_saturated = filt_mag_sq > orig_mag_sq;
+    let has_color = orig_mag_sq > 1e-12;
+
+    let (out_cb, out_cr) = if w_sum > 1e-4 {
+        if too_saturated && has_color {
+            (scaled_cb, scaled_cr)
+        } else {
+            (filtered_cb, filtered_cr)
+        }
+    } else {
+        (ccb, ccr)
+    };
+
+    let (r, g, b) = yc_to_rgb(cy, out_cb, out_cr);
+    [r.max(0.0), g.max(0.0), b.max(0.0)]
+}
+
 fn apply_gentle_detail_enhance(
     buffer: &mut image::ImageBuffer<image::Rgb<f32>, Vec<f32>>,
-    ycbcr_source: &[f32],
+    luma: &[f32],
     amount: f32,
 ) {
     let w = buffer.width() as usize;
     let h = buffer.height() as usize;
 
     let mut temp_blur = vec![0.0; w * h];
-    let radius = 2i32;
-
     temp_blur
         .par_chunks_mut(w)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let row_offset = y * w;
-            for (x, row_val) in row.iter_mut().enumerate() {
-                let mut sum = 0.0;
-                let mut count = 0;
-                for kx in -radius..=radius {
-                    let sx = (x as i32 + kx).clamp(0, (w as i32) - 1) as usize;
-                    sum += ycbcr_source[(row_offset + sx) * 3];
-                    count += 1;
-                }
-                *row_val = sum / count as f32;
-            }
-        });
+        .zip(luma.par_chunks(w))
+        .for_each(|(out, row)| box_blur_row(row, out));
 
     let output = buffer.as_mut();
 
@@ -2824,62 +2919,135 @@ fn apply_gentle_detail_enhance(
         .par_chunks_mut(w * 3)
         .enumerate()
         .for_each(|(y, rgb_row)| {
-            for x in 0..w {
-                let mut blur_sum = 0.0;
-                let mut count = 0;
-                for ky in -radius..=radius {
-                    let sy = (y as i32 + ky).clamp(0, (h as i32) - 1) as usize;
-                    blur_sum += temp_blur[sy * w + x];
-                    count += 1;
-                }
-                let blurred_val = blur_sum / count as f32;
-
-                let original_luma = ycbcr_source[(y * w + x) * 3];
-
-                let detail = original_luma - blurred_val;
-
-                let edge_strength = detail.abs();
-                let adaptive_amount = if edge_strength > 0.1 {
-                    amount * 0.3
-                } else {
-                    amount
-                };
-                let boost = detail * adaptive_amount;
-
-                let r_idx = x * 3;
-                let g_idx = r_idx + 1;
-                let b_idx = r_idx + 2;
-
-                let r = rgb_row[r_idx];
-                let g = rgb_row[g_idx];
-                let b = rgb_row[b_idx];
-
-                let new_r = r + boost;
-                let new_g = g + boost;
-                let new_b = b + boost;
-
-                let max_val = new_r.max(new_g).max(new_b);
-                let min_val = new_r.min(new_g).min(new_b);
-
-                let scale = if max_val > 1.0 || min_val < 0.0 {
-                    if max_val > 1.0 && min_val < 0.0 {
-                        0.0
-                    } else if max_val > 1.0 {
-                        (1.0 - r.max(g).max(b)) / boost.max(0.001)
-                    } else {
-                        r.min(g).min(b) / (-boost).max(0.001)
-                    }
-                } else {
-                    1.0
-                };
-
-                let safe_boost = boost * scale.clamp(0.0, 1.0);
-
-                rgb_row[r_idx] = (r + safe_boost).max(0.0);
-                rgb_row[g_idx] = (g + safe_boost).max(0.0);
-                rgb_row[b_idx] = (b + safe_boost).max(0.0);
-            }
+            let blur_rows: [&[f32]; DETAIL_TAPS] = std::array::from_fn(|k| {
+                let sy = (y + k).saturating_sub(DETAIL_RADIUS).min(h - 1);
+                &temp_blur[sy * w..(sy + 1) * w]
+            });
+            detail_row(&blur_rows, &luma[y * w..(y + 1) * w], amount, rgb_row);
         });
+}
+
+#[multiversion(targets("x86_64+avx+avx2"))]
+fn box_blur_row(row: &[f32], out: &mut [f32]) {
+    let w = row.len();
+    let mut x = 0;
+    while x < DETAIL_RADIUS.min(w) {
+        out[x] = box_blur_pixel(row, x);
+        x += 1;
+    }
+    while x + LANES + DETAIL_RADIUS <= w {
+        let mut sum = [0.0f32; LANES];
+        for k in 0..DETAIL_TAPS {
+            let values = lanes(row, x + k - DETAIL_RADIUS);
+            for i in 0..LANES {
+                sum[i] += values[i];
+            }
+        }
+        for i in 0..LANES {
+            out[x + i] = sum[i] / DETAIL_TAPS as f32;
+        }
+        x += LANES;
+    }
+    while x < w {
+        out[x] = box_blur_pixel(row, x);
+        x += 1;
+    }
+}
+
+#[inline(always)]
+fn box_blur_pixel(row: &[f32], x: usize) -> f32 {
+    let mut sum = 0.0;
+    for k in 0..DETAIL_TAPS {
+        sum += row[(x + k).saturating_sub(DETAIL_RADIUS).min(row.len() - 1)];
+    }
+    sum / DETAIL_TAPS as f32
+}
+
+#[multiversion(targets("x86_64+avx+avx2"))]
+fn detail_row(blur_rows: &[&[f32]; DETAIL_TAPS], luma: &[f32], amount: f32, rgb: &mut [f32]) {
+    let w = luma.len();
+    let mut x = 0;
+    while x + LANES <= w {
+        let mut blur_sum = [0.0f32; LANES];
+        for row in blur_rows {
+            let values = lanes(row, x);
+            for i in 0..LANES {
+                blur_sum[i] += values[i];
+            }
+        }
+        let original_luma = lanes(luma, x);
+        for i in 0..LANES {
+            let pixel = &mut rgb[(x + i) * 3..(x + i) * 3 + 3];
+            let blurred_val = blur_sum[i] / DETAIL_TAPS as f32;
+            let enhanced = detail_pixel(
+                [pixel[0], pixel[1], pixel[2]],
+                original_luma[i],
+                blurred_val,
+                amount,
+            );
+            pixel.copy_from_slice(&enhanced);
+        }
+        x += LANES;
+    }
+    while x < w {
+        let mut blur_sum = 0.0;
+        for row in blur_rows {
+            blur_sum += row[x];
+        }
+        let pixel = &mut rgb[x * 3..x * 3 + 3];
+        let blurred_val = blur_sum / DETAIL_TAPS as f32;
+        let enhanced = detail_pixel([pixel[0], pixel[1], pixel[2]], luma[x], blurred_val, amount);
+        pixel.copy_from_slice(&enhanced);
+        x += 1;
+    }
+}
+
+/// Computes every candidate and then selects, so a group of pixels needs no branches.
+#[inline(always)]
+fn detail_pixel(
+    [r, g, b]: [f32; 3],
+    original_luma: f32,
+    blurred_val: f32,
+    amount: f32,
+) -> [f32; 3] {
+    let detail = original_luma - blurred_val;
+
+    let edge_strength = detail.abs();
+    let adaptive_amount = if edge_strength > 0.1 {
+        amount * 0.3
+    } else {
+        amount
+    };
+    let boost = detail * adaptive_amount;
+
+    let new_r = r + boost;
+    let new_g = g + boost;
+    let new_b = b + boost;
+
+    let max_val = new_r.max(new_g).max(new_b);
+    let min_val = new_r.min(new_g).min(new_b);
+    let too_bright = max_val > 1.0;
+    let too_dark = min_val < 0.0;
+    let bright_scale = (1.0 - r.max(g).max(b)) / boost.max(0.001);
+    let dark_scale = r.min(g).min(b) / (-boost).max(0.001);
+
+    let scale = if too_bright && too_dark {
+        0.0
+    } else if too_bright {
+        bright_scale
+    } else if too_dark {
+        dark_scale
+    } else {
+        1.0
+    };
+
+    let safe_boost = boost * scale.clamp(0.0, 1.0);
+
+    [
+        (r + safe_boost).max(0.0),
+        (g + safe_boost).max(0.0),
+        (b + safe_boost).max(0.0),
+    ]
 }
 
 #[derive(Serialize, Clone)]
@@ -3639,6 +3807,280 @@ mod tests {
                 from_rgb.as_rgb32f().unwrap().as_raw(),
                 from_rgba.as_rgb32f().unwrap().as_raw(),
             );
+        }
+    }
+
+    /// Upstream's scalar implementation, kept to check that the vectorized one gives identical
+    /// output.
+    mod reference {
+        use super::super::{rgb_to_yc_only, yc_to_rgb};
+        use image::DynamicImage;
+        use rayon::prelude::*;
+
+        pub fn remove_raw_artifacts_and_enhance(
+            image: &mut DynamicImage,
+            color_nr_inv_sigma: f32,
+            sharpening_amount: f32,
+        ) {
+            let mut buffer = image.to_rgb32f();
+            let w = buffer.width() as usize;
+            let h = buffer.height() as usize;
+
+            let mut ycbcr_buffer = vec![0.0f32; w * h * 3];
+
+            let src = buffer.as_raw();
+
+            ycbcr_buffer
+                .par_chunks_mut(3)
+                .zip(src.par_chunks(3))
+                .for_each(|(dest, pixel)| {
+                    let (y, cb, cr) = rgb_to_yc_only(pixel[0], pixel[1], pixel[2]);
+                    dest[0] = y;
+                    dest[1] = cb;
+                    dest[2] = cr;
+                });
+
+            if color_nr_inv_sigma > 0.0 {
+                let base_inv_sigma = color_nr_inv_sigma;
+                const OFFSETS: [isize; 3] = [-5, -1, 3];
+                const OFFSET_SQUARES: [f32; 3] = [25.0, 1.0, 9.0];
+
+                buffer
+                    .par_chunks_mut(w * 3)
+                    .enumerate()
+                    .for_each(|(y, row)| {
+                        let row_offset = y * w;
+                        let h_isize = h as isize;
+                        let w_isize = w as isize;
+                        let y_isize = y as isize;
+
+                        for x in 0..w {
+                            let center_idx = (row_offset + x) * 3;
+
+                            let cy = ycbcr_buffer[center_idx];
+                            let ccb = ycbcr_buffer[center_idx + 1];
+                            let ccr = ycbcr_buffer[center_idx + 2];
+
+                            let mut cb_sum = 0.0;
+                            let mut cr_sum = 0.0;
+                            let mut w_sum = 0.0;
+
+                            for (ki, &ky) in OFFSETS.iter().enumerate() {
+                                let sy = y_isize + ky;
+                                if sy < 0 || sy >= h_isize {
+                                    continue;
+                                }
+
+                                let neighbor_row_idx = (sy as usize) * w;
+                                let ky_sq_div_50 = OFFSET_SQUARES[ki] * 0.02;
+
+                                for (kj, &kx) in OFFSETS.iter().enumerate() {
+                                    let sx = (x as isize) + kx;
+                                    if sx < 0 || sx >= w_isize {
+                                        continue;
+                                    }
+
+                                    let neighbor_idx = (neighbor_row_idx + sx as usize) * 3;
+
+                                    let neighbor_y = ycbcr_buffer[neighbor_idx];
+                                    let y_diff = (cy - neighbor_y).abs();
+
+                                    let val = y_diff * base_inv_sigma;
+                                    let spatial_penalty = OFFSET_SQUARES[kj] * 0.02 + ky_sq_div_50;
+
+                                    let weight = 1.0 / (1.0 + val * val + spatial_penalty);
+
+                                    cb_sum += ycbcr_buffer[neighbor_idx + 1] * weight;
+                                    cr_sum += ycbcr_buffer[neighbor_idx + 2] * weight;
+                                    w_sum += weight;
+                                }
+                            }
+
+                            let (out_cb, out_cr) = if w_sum > 1e-4 {
+                                let inv_w_sum = 1.0 / w_sum;
+                                let filtered_cb = cb_sum * inv_w_sum;
+                                let filtered_cr = cr_sum * inv_w_sum;
+
+                                let orig_mag_sq = ccb * ccb + ccr * ccr;
+                                let filt_mag_sq =
+                                    filtered_cb * filtered_cb + filtered_cr * filtered_cr;
+
+                                if filt_mag_sq > orig_mag_sq && orig_mag_sq > 1e-12 {
+                                    let scale = (orig_mag_sq / filt_mag_sq).sqrt();
+                                    (filtered_cb * scale, filtered_cr * scale)
+                                } else {
+                                    (filtered_cb, filtered_cr)
+                                }
+                            } else {
+                                (ccb, ccr)
+                            };
+
+                            let (r, g, b) = yc_to_rgb(cy, out_cb, out_cr);
+
+                            let o = x * 3;
+                            row[o] = r.max(0.0);
+                            row[o + 1] = g.max(0.0);
+                            row[o + 2] = b.max(0.0);
+                        }
+                    });
+            }
+
+            if sharpening_amount > 0.0 {
+                apply_gentle_detail_enhance(&mut buffer, &ycbcr_buffer, sharpening_amount);
+            }
+
+            *image = DynamicImage::ImageRgb32F(buffer);
+        }
+
+        fn apply_gentle_detail_enhance(
+            buffer: &mut image::ImageBuffer<image::Rgb<f32>, Vec<f32>>,
+            ycbcr_source: &[f32],
+            amount: f32,
+        ) {
+            let w = buffer.width() as usize;
+            let h = buffer.height() as usize;
+
+            let mut temp_blur = vec![0.0; w * h];
+            let radius = 2i32;
+
+            temp_blur
+                .par_chunks_mut(w)
+                .enumerate()
+                .for_each(|(y, row)| {
+                    let row_offset = y * w;
+                    for (x, row_val) in row.iter_mut().enumerate() {
+                        let mut sum = 0.0;
+                        let mut count = 0;
+                        for kx in -radius..=radius {
+                            let sx = (x as i32 + kx).clamp(0, (w as i32) - 1) as usize;
+                            sum += ycbcr_source[(row_offset + sx) * 3];
+                            count += 1;
+                        }
+                        *row_val = sum / count as f32;
+                    }
+                });
+
+            let output = buffer.as_mut();
+
+            output
+                .par_chunks_mut(w * 3)
+                .enumerate()
+                .for_each(|(y, rgb_row)| {
+                    for x in 0..w {
+                        let mut blur_sum = 0.0;
+                        let mut count = 0;
+                        for ky in -radius..=radius {
+                            let sy = (y as i32 + ky).clamp(0, (h as i32) - 1) as usize;
+                            blur_sum += temp_blur[sy * w + x];
+                            count += 1;
+                        }
+                        let blurred_val = blur_sum / count as f32;
+
+                        let original_luma = ycbcr_source[(y * w + x) * 3];
+
+                        let detail = original_luma - blurred_val;
+
+                        let edge_strength = detail.abs();
+                        let adaptive_amount = if edge_strength > 0.1 {
+                            amount * 0.3
+                        } else {
+                            amount
+                        };
+                        let boost = detail * adaptive_amount;
+
+                        let r_idx = x * 3;
+                        let g_idx = r_idx + 1;
+                        let b_idx = r_idx + 2;
+
+                        let r = rgb_row[r_idx];
+                        let g = rgb_row[g_idx];
+                        let b = rgb_row[b_idx];
+
+                        let new_r = r + boost;
+                        let new_g = g + boost;
+                        let new_b = b + boost;
+
+                        let max_val = new_r.max(new_g).max(new_b);
+                        let min_val = new_r.min(new_g).min(new_b);
+
+                        let scale = if max_val > 1.0 || min_val < 0.0 {
+                            if max_val > 1.0 && min_val < 0.0 {
+                                0.0
+                            } else if max_val > 1.0 {
+                                (1.0 - r.max(g).max(b)) / boost.max(0.001)
+                            } else {
+                                r.min(g).min(b) / (-boost).max(0.001)
+                            }
+                        } else {
+                            1.0
+                        };
+
+                        let safe_boost = boost * scale.clamp(0.0, 1.0);
+
+                        rgb_row[r_idx] = (r + safe_boost).max(0.0);
+                        rgb_row[g_idx] = (g + safe_boost).max(0.0);
+                        rgb_row[b_idx] = (b + safe_boost).max(0.0);
+                    }
+                });
+        }
+    }
+
+    fn enhance_test_images(w: u32, h: u32) -> [DynamicImage; 2] {
+        let n = (w * h * 3) as usize;
+        let smooth = ImageBuffer::from_fn(w, h, |x, y| {
+            let base = 0.45 + 0.4 * ((x as f32) * 0.37).sin() * ((y as f32) * 0.23).cos();
+            Rgb([base, base * 0.9 + 0.05, (1.05 - base).max(0.0)])
+        });
+        let noise: Vec<f32> = sample_values(n)
+            .into_iter()
+            .zip(smooth.as_raw())
+            .map(|(v, &s)| if v.is_finite() { s + v * 0.02 } else { s })
+            .collect();
+        [
+            DynamicImage::ImageRgb32F(ImageBuffer::from_raw(w, h, noise).unwrap()),
+            DynamicImage::ImageRgb32F(ImageBuffer::from_raw(w, h, sample_values(n)).unwrap()),
+        ]
+    }
+
+    #[test]
+    fn enhance_matches_the_scalar_reference() {
+        let sizes = [
+            (1, 1),
+            (4, 3),
+            (9, 9),
+            (16, 12),
+            (17, 10),
+            (41, 19),
+            (70, 23),
+        ];
+        let settings = [(0.0, 0.35), (2.0, 0.0), (14.0, 0.35), (1190.0, 1.0)];
+        for (w, h) in sizes {
+            for image in enhance_test_images(w, h) {
+                for (color_nr, sharpening) in settings {
+                    let mut expected = image.clone();
+                    let mut actual = image.clone();
+                    reference::remove_raw_artifacts_and_enhance(
+                        &mut expected,
+                        color_nr,
+                        sharpening,
+                    );
+                    remove_raw_artifacts_and_enhance(&mut actual, color_nr, sharpening);
+                    assert_bits_eq(
+                        expected.as_rgb32f().unwrap().as_raw(),
+                        actual.as_rgb32f().unwrap().as_raw(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enhance_keeps_empty_images_empty() {
+        for (w, h) in [(0, 4), (3, 0)] {
+            let mut image = DynamicImage::ImageRgba32F(ImageBuffer::new(w, h));
+            remove_raw_artifacts_and_enhance(&mut image, 14.0, 0.35);
+            assert_eq!(image.dimensions(), (w, h));
+            assert!(image.as_rgb32f().is_some());
         }
     }
 
