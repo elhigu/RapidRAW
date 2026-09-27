@@ -1,5 +1,5 @@
 > [!NOTE]
-> **About this fork:** it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: rendered and exported images were checked to be byte-identical to upstream. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested.
+> **About this fork:** it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: rendered and exported images were checked to be byte-identical to upstream. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
 
 ## Performance fixes in this fork
 
