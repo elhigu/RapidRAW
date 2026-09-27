@@ -5,7 +5,7 @@ use crate::guided_perspective::{GuideLine, compute_guided_homography, count_vali
 use crate::white_balance::{self, WhiteBalance};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Vec2, Vec3};
-use image::{DynamicImage, GenericImageView, Rgb32FImage, Rgba};
+use image::{DynamicImage, GenericImageView, Rgb32FImage, Rgba, Rgba32FImage};
 use imageproc::geometric_transformations::{Border, Interpolation, rotate_about_center};
 use nalgebra::{Matrix3 as NaMatrix3, Vector3 as NaVector3};
 use rawler::decoders::Orientation;
@@ -1534,6 +1534,27 @@ pub fn apply_coarse_rotation<'a>(
     }
 }
 
+fn to_rgba32f_parallel(image: &DynamicImage) -> Cow<'_, Rgba32FImage> {
+    match image {
+        DynamicImage::ImageRgba32F(rgba) => Cow::Borrowed(rgba),
+        DynamicImage::ImageRgb32F(rgb) => {
+            let (width, height) = rgb.dimensions();
+            let mut rgba = vec![0.0f32; width as usize * height as usize * 4];
+            rgba.par_chunks_exact_mut(4)
+                .zip(rgb.as_raw().par_chunks_exact(3))
+                .for_each(|(dst, src)| {
+                    dst[..3].copy_from_slice(src);
+                    dst[3] = 1.0;
+                });
+            Cow::Owned(
+                Rgba32FImage::from_raw(width, height, rgba)
+                    .expect("RGBA buffer matches image dimensions"),
+            )
+        }
+        other => Cow::Owned(other.to_rgba32f()),
+    }
+}
+
 pub fn apply_rotation<'a>(
     image: impl IntoCowImage<'a>,
     rotation_degrees: f32,
@@ -1543,7 +1564,7 @@ pub fn apply_rotation<'a>(
         return image;
     }
 
-    let rgba_image = image.to_rgba32f();
+    let rgba_image = to_rgba32f_parallel(&image);
     let rotated = rotate_about_center(
         &rgba_image,
         rotation_degrees * PI / 180.0,
@@ -1552,6 +1573,39 @@ pub fn apply_rotation<'a>(
     );
 
     Cow::Owned(DynamicImage::ImageRgba32F(rotated))
+}
+
+fn crop_image(image: &DynamicImage, x: u32, y: u32, width: u32, height: u32) -> DynamicImage {
+    fn crop_rows<P: image::Pixel<Subpixel = f32> + Sync>(
+        image: &image::ImageBuffer<P, Vec<f32>>,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> image::ImageBuffer<P, Vec<f32>> {
+        let channels = P::CHANNEL_COUNT as usize;
+        let src_stride = image.width() as usize * channels;
+        let row_len = width as usize * channels;
+        let mut out = vec![0.0f32; row_len * height as usize];
+        out.par_chunks_exact_mut(row_len)
+            .enumerate()
+            .for_each(|(row, dst)| {
+                let start = (y as usize + row) * src_stride + x as usize * channels;
+                dst.copy_from_slice(&image.as_raw()[start..start + row_len]);
+            });
+        image::ImageBuffer::from_raw(width, height, out)
+            .expect("crop buffer matches crop dimensions")
+    }
+
+    match image {
+        DynamicImage::ImageRgb32F(rgb) => {
+            DynamicImage::ImageRgb32F(crop_rows(rgb, x, y, width, height))
+        }
+        DynamicImage::ImageRgba32F(rgba) => {
+            DynamicImage::ImageRgba32F(crop_rows(rgba, x, y, width, height))
+        }
+        other => other.crop_imm(x, y, width, height),
+    }
 }
 
 pub fn apply_crop<'a>(image: impl IntoCowImage<'a>, crop_value: &Value) -> Cow<'a, DynamicImage> {
@@ -1576,7 +1630,7 @@ pub fn apply_crop<'a>(image: impl IntoCowImage<'a>, crop_value: &Value) -> Cow<'
                     if x == 0 && y == 0 && new_width == img_w && new_height == img_h {
                         return image;
                     }
-                    return Cow::Owned(image.crop_imm(x, y, new_width, new_height));
+                    return Cow::Owned(crop_image(&image, x, y, new_width, new_height));
                 }
             }
         }
