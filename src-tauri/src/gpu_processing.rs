@@ -444,6 +444,39 @@ pub fn get_or_init_gpu_context(
     Ok(new_context)
 }
 
+/// The optional blurs the main shader reads. Each adjustment that uses the sharpness, clarity or
+/// structure blur returns early when its total amount is zero, and the total is the global value
+/// plus each mask's value weighted by its influence.
+#[derive(Debug, PartialEq)]
+struct UsedBlurs {
+    sharpness: bool,
+    clarity: bool,
+    structure: bool,
+}
+
+impl UsedBlurs {
+    fn for_adjustments(adjustments: &AllAdjustments) -> Self {
+        let g = &adjustments.global;
+        let masks =
+            &adjustments.mask_adjustments[..(adjustments.mask_count as usize).min(MAX_MASKS)];
+        Self {
+            sharpness: g.sharpness != 0.0 || masks.iter().any(|m| m.sharpness != 0.0),
+            clarity: g.clarity != 0.0
+                || g.centré != 0.0
+                || g.halation_amount != 0.0
+                || masks
+                    .iter()
+                    .any(|m| m.clarity != 0.0 || m.halation_amount != 0.0),
+            structure: g.structure != 0.0
+                || g.glow_amount != 0.0
+                || g.dehaze != 0.0
+                || masks
+                    .iter()
+                    .any(|m| m.structure != 0.0 || m.glow_amount != 0.0 || m.dehaze != 0.0),
+        }
+    }
+}
+
 fn read_texture_data_roi(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1516,6 +1549,8 @@ impl GpuProcessor {
         let end_tile_x = (bounds.x + bounds.width).div_ceil(TILE_SIZE);
         let end_tile_y = (bounds.y + bounds.height).div_ceil(TILE_SIZE);
 
+        let used_blurs = UsedBlurs::for_adjustments(&adjustments);
+
         for tile_y in start_tile_y..end_tile_y {
             for tile_x in start_tile_x..end_tile_x {
                 let x_start_unclamped = tile_x * TILE_SIZE;
@@ -1624,10 +1659,13 @@ impl GpuProcessor {
                     true
                 };
 
-                let did_create_sharpness_blur = run_blur(1.0, &self.sharpness_blur_view);
+                let did_create_sharpness_blur =
+                    used_blurs.sharpness && run_blur(1.0, &self.sharpness_blur_view);
                 let did_create_tonal_blur = run_blur(3.5, &self.tonal_blur_view);
-                let did_create_clarity_blur = run_blur(8.0, &self.clarity_blur_view);
-                let did_create_structure_blur = run_blur(40.0, &self.structure_blur_view);
+                let did_create_clarity_blur =
+                    used_blurs.clarity && run_blur(8.0, &self.clarity_blur_view);
+                let did_create_structure_blur =
+                    used_blurs.structure && run_blur(40.0, &self.structure_blur_view);
 
                 let main_span = crate::perf_trace::span("gpu.main_kernel");
                 let mut main_encoder = device.create_command_encoder(&Default::default());
@@ -2360,5 +2398,61 @@ mod tests {
             H,
             |x, y| Luma([(x * y * 71) as u16]),
         )));
+    }
+}
+
+#[cfg(test)]
+mod used_blurs_tests {
+    use super::*;
+
+    fn used_with(set: impl Fn(&mut AllAdjustments)) -> (bool, bool, bool) {
+        let mut adjustments: AllAdjustments = bytemuck::Zeroable::zeroed();
+        set(&mut adjustments);
+        let used = UsedBlurs::for_adjustments(&adjustments);
+        (used.sharpness, used.clarity, used.structure)
+    }
+
+    #[test]
+    fn blurs_are_used_only_by_nonzero_adjustments() {
+        assert_eq!(used_with(|_| {}), (false, false, false));
+        assert_eq!(
+            used_with(|a| a.global.sharpness = -5.0),
+            (true, false, false)
+        );
+        assert_eq!(used_with(|a| a.global.clarity = 10.0), (false, true, false));
+        assert_eq!(used_with(|a| a.global.centré = 0.3), (false, true, false));
+        assert_eq!(
+            used_with(|a| a.global.halation_amount = 0.2),
+            (false, true, false)
+        );
+        assert_eq!(
+            used_with(|a| a.global.structure = 15.0),
+            (false, false, true)
+        );
+        assert_eq!(
+            used_with(|a| a.global.glow_amount = 0.1),
+            (false, false, true)
+        );
+        assert_eq!(used_with(|a| a.global.dehaze = -8.0), (false, false, true));
+    }
+
+    #[test]
+    fn masks_count_only_up_to_mask_count() {
+        let masks = |count: u32| {
+            move |a: &mut AllAdjustments| {
+                a.mask_count = count;
+                a.mask_adjustments[0].clarity = 12.0;
+                a.mask_adjustments[1].structure = 20.0;
+            }
+        };
+        assert_eq!(used_with(masks(1)), (false, true, false));
+        assert_eq!(used_with(masks(2)), (false, true, true));
+        assert_eq!(
+            used_with(|a| {
+                a.mask_count = 1;
+                a.mask_adjustments[0].sharpness = f32::NAN;
+            }),
+            (true, false, false)
+        );
     }
 }
