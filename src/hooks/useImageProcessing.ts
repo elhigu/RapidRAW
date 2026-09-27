@@ -7,9 +7,10 @@ import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { Adjustments, COPYABLE_ADJUSTMENT_KEYS } from '../utils/adjustments';
-import { Invokes, Panel } from '../components/ui/AppProperties';
+import { Invokes, LibraryDisplayMode, Panel } from '../components/ui/AppProperties';
 import { debouncedSave } from './useEditorActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { useOsPlatform } from './useOsPlatform';
 
 export function useImageProcessing(
   transformWrapperRef: any,
@@ -37,6 +38,13 @@ export function useImageProcessing(
   const activePanel = useUIStore((state) => state.activePanel);
   const appSettings = useSettingsStore((state) => state.appSettings);
   const multiSelectedPaths = useLibraryStore((state) => state.multiSelectedPaths);
+  const osPlatform = useOsPlatform();
+
+  // The culling view can show live renders only when they come back as images rather than being
+  // drawn by the wgpu renderer, which never runs on Linux and Android.
+  const rendersToImages = osPlatform === 'linux' || osPlatform === 'android' || appSettings?.useWgpuRenderer === false;
+  const isCullingView =
+    activeView === 'library' && appSettings?.libraryDisplayMode === LibraryDisplayMode.Cull && rendersToImages;
 
   const uncroppedJobIdRef = useRef(0);
   const latestUncroppedJobIdRef = useRef(0);
@@ -172,7 +180,7 @@ export function useImageProcessing(
       }
 
       const jobId = ++previewJobIdRef.current;
-      const roi = calculateROI();
+      const roi = useUIStore.getState().activeView === 'editor' ? calculateROI() : null;
 
       try {
         const buffer: ArrayBuffer = await invoke(Invokes.ApplyAdjustments, {
@@ -427,7 +435,7 @@ export function useImageProcessing(
     const renderAdjustments = previewOverride ?? adjustments;
 
     if (activeView !== 'editor') {
-      if (isSliderDragging) return;
+      if (isSliderDragging && !isCullingView) return;
     }
 
     if (isSliderDragging) {
@@ -489,6 +497,7 @@ export function useImageProcessing(
     selectedImage?.path,
     selectedImage?.isReady,
     isSliderDragging,
+    isCullingView,
     multiSelectedPaths,
     appSettings?.enableLivePreviews,
     appSettings?.copyPasteSettings?.includedAdjustments,
