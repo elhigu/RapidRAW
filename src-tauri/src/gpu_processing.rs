@@ -1940,8 +1940,13 @@ fn process_and_get_dynamic_image_inner(
     };
     drop(lock_span);
     let mut needs_new_processor = false;
-    let new_width = (width + 255) & !255;
-    let new_height = (height + 255) & !255;
+    let (current_width, current_height) = processor_lock
+        .as_ref()
+        .map_or((0, 0), |p| (p.width, p.height));
+    // Grow to fit both the old and the new size, so alternating portrait and landscape photos
+    // share one processor instead of replacing it on every switch.
+    let new_width = (width.max(current_width) + 255) & !255;
+    let new_height = (height.max(current_height) + 255) & !255;
 
     if let Some(p) = processor_lock.as_ref() {
         if p.width < width || p.height < height {
