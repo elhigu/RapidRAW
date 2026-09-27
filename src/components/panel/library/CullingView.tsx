@@ -93,7 +93,8 @@ function CullingPreview({
   const isHidden = isEditorOpen && hasSelectedImage;
 
   // While a slider is dragged for this image, the editor's live renders and then its final render
-  // are shown on top, until a full-resolution render that includes the edit is on screen.
+  // are shown on top, until a full-resolution render that includes the edit is on screen. The
+  // editor's render also stands in while the full-resolution render of a new image is loading.
   const editorPatchUrl = useEditorStore((s) =>
     s.selectedImage?.path === image.path ? (s.interactivePatch?.url ?? null) : null,
   );
@@ -557,9 +558,9 @@ function CullingPreview({
             />
           )}
 
-          {liveSrc && (
+          {(liveSrc || (!highResSrc && editorPreviewUrl)) && (
             <img
-              src={liveSrc}
+              src={liveSrc ?? editorPreviewUrl ?? undefined}
               className="absolute inset-0 w-full h-full object-contain"
               alt=""
               aria-hidden
