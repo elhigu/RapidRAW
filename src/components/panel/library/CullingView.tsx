@@ -553,9 +553,9 @@ function CullingPreview({
             />
           )}
 
-          {liveSrc && (
+          {(liveSrc || (!highResSrc && editorPreviewUrl)) && (
             <img
-              src={liveSrc}
+              src={liveSrc ?? editorPreviewUrl ?? undefined}
               className="absolute inset-0 w-full h-full object-contain"
               alt=""
               aria-hidden
