@@ -1,3 +1,28 @@
+> [!NOTE]
+> **About this fork:** it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: rendered and exported images were checked to be byte-identical to upstream. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested.
+
+## Performance fixes in this fork
+
+On the laptop above, opening a 12 MP raw went from 6.4 s to about 0.4 s, and exporting 12 raws as TIFF or JPEG from 23–26 s to about 6 s. Applying a style to an open photo takes 8–20 ms. Timings below are for 12 MP Sony A7S II and 26 MP Sony a6700 raws.
+
+- **No memory compaction stalls on Linux:** mimalloc no longer asks for transparent huge pages. On a system with fragmented memory, the kernel otherwise spent 1–2 s compacting memory each time a new image buffer was touched. Opening a 12 MP raw: 6.4 s → 0.86 s.
+- **Parallel raw post-processing:** highlight recovery and pixel format conversions use all CPU cores. Opening a 12 MP raw: 0.89 s → 0.40 s.
+- **Vectorized raw enhancement:** colour noise reduction and detail enhancement process eight pixels at a time, with AVX2 when the CPU supports it. Raw enhancement of a 26 MP raw: ~260 ms → ~94 ms.
+- **Fewer full-image copies in raw enhancement:** ~230 ms → ~170–200 ms for a 26 MP raw.
+- **Parallel rotation and flipping:** rotating a 26 MP portrait photo: 97 ms → 40 ms.
+- **Reliable decoded-image cache:** a cached decode is reused only while the file and the raw processing settings are unchanged, which fixes stale previews for tethered shots that reuse file names. Full-resolution previews in the culling view, negative conversion and collage now reuse it: 394 ms → 153 ms for a 12 MP raw.
+- **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Decoding the next photo when you open it: 247 ms → 0.3 ms. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
+- **GPU pipelines compiled once:** shaders are compiled once per GPU instead of for every image processor, and the 16-bit export pipeline only when it is needed. Creating a processor: 16 ms → 10 ms.
+
+Tools added for this work:
+
+- `rapidraw bench <image>` measures the image pipeline without opening a window. See [bench/README.md](bench/README.md).
+- The log names the GPU adapter and backend in use, which shows a silent fallback from Vulkan to the slower GL backend.
+
+The code is 100% AI-generated with Claude Code. It was checked with byte-for-byte comparisons against upstream and tested by hand on raw photos from a Sony A7S II and a Sony a6700.
+
+---
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/CyberTimon/RapidRAW/assets/.github/assets/editor.jpg" alt="RapidRAW Editor">
 </p>
