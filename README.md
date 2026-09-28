@@ -1,4 +1,6 @@
-**Before and after this fork's fixes**, editing raw photos in the culling view on the laptop described below. The animations play in real time.
+## Before and after
+
+Editing raw photos in the culling view with and without this fork's fixes, on the laptop described below. The animations play in real time.
 
 **Before:**
 
