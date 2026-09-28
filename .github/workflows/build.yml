@@ -121,10 +121,17 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          RELEASE_ID: ${{ inputs.release-id }}
         run: |
-          # Forks don't have the signing key; build an unsigned APK there instead of failing.
           if [ -z "$ANDROID_KEY_BASE64" ]; then
-            echo "No Android signing key available, building an unsigned APK."
+            if [ -n "$RELEASE_ID" ]; then
+              echo "::error::Android release builds need the signing key secrets."
+              exit 1
+            fi
+            # Forks don't have the signing key, and release builds must be signed. Build a
+            # debug APK instead, as for pull requests, to still check that the app builds.
+            echo "No Android signing key available, building a debug APK."
+            echo "ANDROID_BUILD_ARGS=--debug" >> "$GITHUB_ENV"
             exit 0
           fi
           cd src-tauri/gen/android
@@ -177,7 +184,7 @@ jobs:
           ORT_LIB_LOCATION: ${{ format('{0}/src-tauri/libs/arm64-v8a', github.workspace) }}
           ORT_STRATEGY: manual
         run: |
-          npx tauri android build --verbose ${{ inputs.build-args }}
+          npx tauri android build --verbose ${{ inputs.build-args }} $ANDROID_BUILD_ARGS
 
       - name: Prepare Android Release Assets
         if: ${{ inputs.mobile == 'android' && inputs.release-id != '' }}
