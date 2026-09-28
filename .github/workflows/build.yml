@@ -117,11 +117,20 @@ jobs:
 
       - name: Setup Android signing
         if: inputs.mobile == 'android' && github.event_name != 'pull_request'
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
         run: |
+          # Forks don't have the signing key; build an unsigned APK there instead of failing.
+          if [ -z "$ANDROID_KEY_BASE64" ]; then
+            echo "No Android signing key available, building an unsigned APK."
+            exit 0
+          fi
           cd src-tauri/gen/android
-          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" > keystore.properties
-          echo "password=${{ secrets.ANDROID_KEY_PASSWORD }}" >> keystore.properties
-          echo "${{ secrets.ANDROID_KEY_BASE64 }}" | base64 -d > $RUNNER_TEMP/keystore.jks
+          echo "keyAlias=$ANDROID_KEY_ALIAS" > keystore.properties
+          echo "password=$ANDROID_KEY_PASSWORD" >> keystore.properties
+          echo "$ANDROID_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/keystore.jks"
           echo "storeFile=$RUNNER_TEMP/keystore.jks" >> keystore.properties
 
       - name: rustup install target
