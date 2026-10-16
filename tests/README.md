@@ -35,3 +35,9 @@ enables. CI runs them on every pull request and push to main.
   change between Rust or library versions, such as `DefaultHasher` hashes.
 - A test that needs a GPU or a display returns early, with a printed reason, on machines without
   one.
+
+## Other checks
+
+- `tests/linux-animation-flicker` finds one-frame flicker at the end of UI animations on Linux. It
+  needs a Wayland compositor and screen recording tools, so it runs by hand, not in `npm test` or
+  CI. See its README.
