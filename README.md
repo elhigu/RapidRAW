@@ -36,8 +36,11 @@ On the laptop above, opening a 12 MP raw went from 6.4 s to about 0.4 s, and exp
 
 RapidRAW 1.6.5 itself now skips GPU blurs that no adjustment uses and avoids copying unedited images, so earlier builds' fixes for those are no longer part of this fork.
 
+Measured with `rapidraw bench` on a 12 MP and a 26 MP raw, compared with upstream: opening a photo is 29× faster, a full-resolution preview 49×, a JPEG export 10× and a preview after a style change 1.9×, with identical output in every step.
+
 Tools added for this work:
 
+- `rapidraw bench` times the internal functions of the image pipeline on real photos, from raw decoding to export, and checks that their output stays the same. It is the first change on this fork's main, so `bench/bench-commits.sh` can benchmark each feature merge after it. See [bench/pipeline-bench.md](bench/pipeline-bench.md).
 - `bench/compare-renders.sh` exports a folder with two builds, compares their export times and checks that the files are byte-identical. See [bench/README.md](bench/README.md).
 - The log names the GPU adapter and backend in use, which shows a silent fallback from Vulkan to the slower GL backend.
 
