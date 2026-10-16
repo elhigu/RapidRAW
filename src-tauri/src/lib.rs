@@ -2049,6 +2049,12 @@ fn frontend_ready(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 2.54's Skia compositor flickers at the end of fades (tests/linux-animation-flicker)
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_USE_SKIA_FOR_COMPOSITION").is_none() {
+        unsafe { std::env::set_var("WEBKIT_USE_SKIA_FOR_COMPOSITION", "0") };
+    }
+
     let _ = rayon::ThreadPoolBuilder::new()
         .stack_size(8 * 1024 * 1024)
         .build_global();
@@ -2318,6 +2324,12 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             {
                 window_builder = window_builder.decorations(decorations).visible(false);
+            }
+
+            // No wgpu renderer on Linux; the non-Skia compositor flickers on transparent windows
+            #[cfg(target_os = "linux")]
+            {
+                window_builder = window_builder.transparent(false);
             }
 
             let window = window_builder.build().expect("Failed to build window");
