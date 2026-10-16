@@ -1845,6 +1845,14 @@ fn frontend_ready(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 2.54's Skia compositor draws one more frame of every finished fade with the value
+    // it had before the fade started, so UI animations flicker (tests/linux-animation-flicker).
+    // Use WebKit's previous compositor unless the user picked one. Set before any thread starts.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_USE_SKIA_FOR_COMPOSITION").is_none() {
+        unsafe { std::env::set_var("WEBKIT_USE_SKIA_FOR_COMPOSITION", "0") };
+    }
+
     let _ = rayon::ThreadPoolBuilder::new()
         .stack_size(8 * 1024 * 1024)
         .build_global();
@@ -2106,6 +2114,14 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             {
                 window_builder = window_builder.decorations(decorations).visible(false);
+            }
+
+            // The window is transparent for the wgpu renderer, which Linux doesn't use. On a
+            // transparent window, WebKitGTK's previous compositor (see run()) shows parts of older
+            // frames while the UI animates.
+            #[cfg(target_os = "linux")]
+            {
+                window_builder = window_builder.transparent(false);
             }
 
             let window = window_builder.build().expect("Failed to build window");
