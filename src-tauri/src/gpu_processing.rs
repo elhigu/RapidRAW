@@ -225,6 +225,16 @@ pub fn get_or_init_gpu_context(
         format!("Failed to find a wgpu adapter: {}", e)
     })?;
 
+    let adapter_info = adapter.get_info();
+    log::info!(
+        "Using GPU adapter: {} ({:?}, {:?}, driver: {} {})",
+        adapter_info.name,
+        adapter_info.backend,
+        adapter_info.device_type,
+        adapter_info.driver,
+        adapter_info.driver_info
+    );
+
     let mut required_features = wgpu::Features::empty();
     if adapter
         .features()
@@ -426,6 +436,7 @@ pub fn get_or_init_gpu_context(
         device: Arc::new(device),
         queue: Arc::new(queue),
         limits,
+        adapter_info,
         display: Arc::new(std::sync::Mutex::new(display_opt)),
     };
     *context_lock = Some(new_context.clone());
@@ -504,26 +515,27 @@ fn read_texture_data_roi(
 }
 
 fn to_rgba_f16(img: &DynamicImage) -> Vec<f16> {
+    use rayon::prelude::*;
+    let convert = |src: &[f32], channels: usize| {
+        let mut out = vec![f16::ZERO; src.len() / channels * 4];
+        out.par_chunks_exact_mut(4)
+            .zip(src.par_chunks_exact(channels))
+            .for_each(|(dst, p)| {
+                dst[0] = f16::from_f32(p[0]);
+                dst[1] = f16::from_f32(p[1]);
+                dst[2] = f16::from_f32(p[2]);
+                dst[3] = if channels == 4 {
+                    f16::from_f32(p[3])
+                } else {
+                    f16::ONE
+                };
+            });
+        out
+    };
     match img {
-        DynamicImage::ImageRgb32F(buffer) => {
-            let mut output = Vec::with_capacity(buffer.as_raw().len() / 3 * 4);
-            for pixel in buffer.pixels() {
-                output.extend([
-                    f16::from_f32(pixel[0]),
-                    f16::from_f32(pixel[1]),
-                    f16::from_f32(pixel[2]),
-                    f16::ONE,
-                ]);
-            }
-            output
-        }
-        DynamicImage::ImageRgba32F(buffer) => {
-            buffer.as_raw().iter().copied().map(f16::from_f32).collect()
-        }
-        _ => {
-            let rgba_f32 = img.to_rgba32f();
-            rgba_f32.into_raw().into_iter().map(f16::from_f32).collect()
-        }
+        DynamicImage::ImageRgba32F(buffer) => convert(buffer.as_raw(), 4),
+        DynamicImage::ImageRgb32F(buffer) => convert(buffer.as_raw(), 3),
+        other => convert(other.to_rgba32f().as_raw(), 4),
     }
 }
 
@@ -2594,5 +2606,59 @@ fn process_and_get_dynamic_image_inner(
                 .ok_or("Failed to create 16-bit image buffer from GPU data")?;
             Ok(DynamicImage::ImageRgba16(img_buf))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::sample_values;
+    use image::{ImageBuffer, Luma, Rgb};
+
+    const W: u32 = 29;
+    const H: u32 = 31;
+
+    fn serial_reference(img: &DynamicImage) -> Vec<f16> {
+        img.to_rgba32f()
+            .into_raw()
+            .into_iter()
+            .map(f16::from_f32)
+            .collect()
+    }
+
+    fn assert_same_bits(img: &DynamicImage) {
+        let expected: Vec<u16> = serial_reference(img).iter().map(|v| v.to_bits()).collect();
+        let actual: Vec<u16> = to_rgba_f16(img).iter().map(|v| v.to_bits()).collect();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn to_rgba_f16_matches_serial_conversion_for_rgba_f32() {
+        let values = sample_values((W * H * 4) as usize);
+        assert_same_bits(&DynamicImage::ImageRgba32F(
+            ImageBuffer::from_raw(W, H, values).unwrap(),
+        ));
+    }
+
+    #[test]
+    fn to_rgba_f16_matches_serial_conversion_for_rgb_f32() {
+        let values = sample_values((W * H * 3) as usize);
+        assert_same_bits(&DynamicImage::ImageRgb32F(
+            ImageBuffer::from_raw(W, H, values).unwrap(),
+        ));
+    }
+
+    #[test]
+    fn to_rgba_f16_matches_serial_conversion_for_integer_formats() {
+        assert_same_bits(&DynamicImage::ImageRgb8(ImageBuffer::from_fn(
+            W,
+            H,
+            |x, y| Rgb([(x * 5) as u8, (y * 9) as u8, 200]),
+        )));
+        assert_same_bits(&DynamicImage::ImageLuma16(ImageBuffer::from_fn(
+            W,
+            H,
+            |x, y| Luma([(x * y * 71) as u16]),
+        )));
     }
 }
