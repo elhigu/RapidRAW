@@ -1212,7 +1212,7 @@ pub fn mime_type_for_extension(extension: &str) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_image_for_export(
+pub(crate) fn process_image_for_export(
     path: &str,
     base_image: &DynamicImage,
     js_adjustments: &Value,
@@ -1265,7 +1265,7 @@ fn encode_grayscale_to_png(bitmap: &GrayImage) -> Result<Vec<u8>, String> {
 
 const SRGB_ICC_PROFILE: &[u8] = include_bytes!("../icc/sRGB-v2-magic.icc");
 
-fn encode_image_to_bytes(
+pub(crate) fn encode_image_to_bytes(
     image: &DynamicImage,
     output_format: &str,
     export_settings: &ExportSettings,
@@ -2178,6 +2178,9 @@ pub async fn run_headless_export(
     session: crate::launch_request::HeadlessExportSession,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    if let Some(bench) = session.bench {
+        return crate::bench::run_headless_bench(bench, app_handle).await;
+    }
     cli_println!("Starting headless export...");
     let state = app_handle.state::<crate::AppState>();
 

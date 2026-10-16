@@ -32,6 +32,7 @@ mod apple_raw;
 mod as_shot;
 mod auto_straighten;
 mod baseline_exposure;
+mod bench;
 mod cache_utils;
 mod camera_tethering;
 mod culling;
