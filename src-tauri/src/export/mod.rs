@@ -147,13 +147,13 @@ fn process_image_for_export_pipeline(
         .collect()
 }
 
-struct ExportImage {
-    image: DynamicImage,
+pub(crate) struct ExportImage {
+    pub(crate) image: DynamicImage,
     hdr: Option<DynamicImage>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_image_for_export(
+pub(crate) fn process_image_for_export(
     path: &str,
     base_image: &DynamicImage,
     base_scale: f32,
@@ -1043,6 +1043,9 @@ pub async fn run_headless_export(
     session: HeadlessExportSession,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    if let Some(bench) = session.bench {
+        return crate::bench::run_headless_bench(bench, app_handle).await;
+    }
     cli_println!("Starting headless export...");
     let state = app_handle.state::<AppState>();
 

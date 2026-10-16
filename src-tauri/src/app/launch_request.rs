@@ -28,6 +28,8 @@ pub struct HeadlessExportSession {
     pub adjustments_override: Option<String>,
     pub export_original: Option<OriginalExportOptions>,
     pub on_conflict: Option<ConflictAction>,
+    /// Set by `rapidraw bench`, which runs the pipeline benchmark instead of an export.
+    pub bench: Option<crate::bench::BenchSession>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,26 @@ pub struct LaunchPayload {
 }
 
 pub fn parse_launch_args(args: &[String]) -> LaunchRequest {
+    if args.first().map(|s| s.as_str()) == Some("bench") {
+        return match crate::bench::parse_bench_args(&args[1..]) {
+            Ok(bench) => LaunchRequest::HeadlessExport(HeadlessExportSession {
+                source: String::new(),
+                output: String::new(),
+                format: String::new(),
+                quality: 0,
+                tiff_bit_depth: TiffBitDepth::default(),
+                color_space: OutputColorSpace::default(),
+                hdr: false,
+                hdr_headroom: crate::render::hdr::Headroom::DEFAULT_STOPS,
+                keep_metadata: false,
+                adjustments_override: None,
+                export_original: None,
+                on_conflict: None,
+                bench: Some(bench),
+            }),
+            Err(error) => LaunchRequest::InvalidHeadless(error),
+        };
+    }
     if args.first().map(|s| s.as_str()) == Some("export") {
         let mut iter = args.iter().skip(1);
 
@@ -220,6 +242,7 @@ pub fn parse_launch_args(args: &[String]) -> LaunchRequest {
                 keep_exposure: original_keep_exposure,
             }),
             on_conflict,
+            bench: None,
         });
     }
 
