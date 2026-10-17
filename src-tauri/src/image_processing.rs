@@ -3912,3 +3912,6 @@ pub async fn sample_white_balance(
     .await
     .map_err(|e| format!("Task execution failed: {}", e))?
 }
+
+#[cfg(test)]
+mod tests;
