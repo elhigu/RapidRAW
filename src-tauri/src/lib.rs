@@ -97,10 +97,10 @@ use crate::cache_utils::{
     DecodedImageCache, calculate_full_job_hash, calculate_geometry_hash, calculate_transform_hash,
     calculate_visual_hash,
 };
-use crate::file_management::{parse_virtual_path, read_file_mapped};
+use crate::file_management::parse_virtual_path;
 use crate::formats::is_raw_file;
 use crate::hdr_deghosting::{align_hdr_frames, assert_uniform_dimensions, load_hdr_frames};
-use crate::image_loader::{composite_patches_on_image, load_and_composite};
+use crate::image_loader::composite_patches_on_image;
 use crate::image_processing::{
     Crop, RenderRequest, apply_coarse_rotation, apply_flip, apply_geometry_warp,
     apply_linear_to_srgb, downscale_f32_image, get_all_adjustments_from_json,
@@ -1508,37 +1508,24 @@ async fn generate_preview_for_path(
         let is_raw = is_raw_file(&source_path_str);
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
-        let base_image = match read_file_mapped(&source_path) {
-            Ok(mmap) => load_and_composite(
-                &mmap,
-                &source_path_str,
-                &js_adjustments,
-                false,
-                &settings,
-                None,
+        let (pristine, _exif) =
+            crate::image_loader::get_or_decode_pristine(&state, &source_path, &settings, None)?;
+        let has_patches = js_adjustments
+            .get("aiPatches")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty());
+        let denoised =
+            crate::ai_denoise::apply_ai_denoise(&pristine, &source_path_str, &js_adjustments);
+        let base_image = if has_patches {
+            Cow::Owned(
+                composite_patches_on_image(&denoised, &js_adjustments)
+                    .map_err(|e| e.to_string())?,
             )
-            .map_err(|e| e.to_string())?,
-            Err(e) => {
-                log::warn!(
-                    "Failed to memory-map file '{}': {}. Falling back to standard read.",
-                    source_path_str,
-                    e
-                );
-                let bytes = fs::read(&source_path).map_err(|io_err| io_err.to_string())?;
-                load_and_composite(
-                    &bytes,
-                    &source_path_str,
-                    &js_adjustments,
-                    false,
-                    &settings,
-                    None,
-                )
-                .map_err(|e| e.to_string())?
-            }
+        } else {
+            denoised
         };
-
         let (transformed_image, unscaled_crop_offset) =
-            apply_all_transformations(Cow::Borrowed(&base_image), &js_adjustments);
+            apply_all_transformations(Cow::Borrowed(base_image.as_ref()), &js_adjustments);
         let (img_w, img_h) = transformed_image.dimensions();
         let mask_definitions: Vec<MaskDefinition> = js_adjustments
             .get("masks")
