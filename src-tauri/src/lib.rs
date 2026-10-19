@@ -24,6 +24,8 @@ mod ai_commands;
 mod ai_connector;
 mod ai_denoise;
 mod ai_processing;
+#[cfg(all(test, target_os = "linux"))]
+mod allocator_tests;
 mod android_integration;
 mod app_settings;
 mod app_state;
@@ -62,6 +64,8 @@ mod raw_processing;
 mod relight;
 mod tagging;
 mod tagging_utils;
+#[cfg(test)]
+mod test_support;
 mod white_balance;
 mod window_customizer;
 
