@@ -2608,3 +2608,6 @@ fn process_and_get_dynamic_image_inner(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
