@@ -373,3 +373,6 @@ pub fn get_fast_demosaic_scale_factor(
     }
     1.0
 }
+
+#[cfg(test)]
+mod tests;
