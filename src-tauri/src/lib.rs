@@ -19,6 +19,16 @@ macro_rules! cli_eprintln {
     }};
 }
 
+// Declares a module that is public with the test-api feature, for the tests in tests/rust.
+macro_rules! test_api_mod {
+    ($name:ident) => {
+        #[cfg(feature = "test-api")]
+        pub mod $name;
+        #[cfg(not(feature = "test-api"))]
+        mod $name;
+    };
+}
+
 mod adjustment_utils;
 mod ai_commands;
 mod ai_connector;
@@ -33,7 +43,7 @@ mod as_shot;
 mod auto_straighten;
 mod baseline_exposure;
 mod bm3d;
-mod cache_utils;
+test_api_mod!(cache_utils);
 mod camera_tethering;
 mod culling;
 mod effect_maps;

@@ -128,6 +128,11 @@ jobs:
         if: ${{ inputs.target != '' }}
         run: rustup target add ${{ inputs.target }}
 
+      - name: Run tests
+        if: ${{ inputs.mobile == '' }}
+        working-directory: src-tauri
+        run: cargo test --features test-api --test rust ${{ inputs.target != '' && '--target' || '' }} ${{ inputs.target }}
+
       - id: patch-release-name
         shell: bash
         if: ${{ inputs.release-id != '' }}
