@@ -1903,6 +1903,7 @@ fn frontend_log(level: String, message: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 #[derive(Clone, Copy, Debug)]
 struct MonitorBounds {
     x: i32,
@@ -1933,11 +1934,7 @@ fn available_monitor_bounds(window: &tauri::WebviewWindow) -> Vec<MonitorBounds>
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "android")]
-fn available_monitor_bounds(_window: &tauri::WebviewWindow) -> Vec<MonitorBounds> {
-    Vec::new()
-}
-
+#[cfg(not(target_os = "android"))]
 fn saved_window_state_is_usable(
     state: &WindowState,
     monitors: &[MonitorBounds],
@@ -2053,6 +2050,7 @@ pub fn run() {
     }
     let is_headless = matches!(launch_req, LaunchRequest::HeadlessExport(_));
 
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(unused_mut))]
     let mut builder = tauri::Builder::default();
 
     #[cfg(target_os = "linux")]
@@ -2135,6 +2133,7 @@ pub fn run() {
                 });
             }
 
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             let state = app.state::<AppState>();
 
             #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -2304,6 +2303,7 @@ pub fn run() {
                 .expect("Main window config not found")
                 .clone();
 
+            #[cfg_attr(target_os = "android", allow(unused_mut))]
             let mut window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), &main_window_cfg)
                     .unwrap();
