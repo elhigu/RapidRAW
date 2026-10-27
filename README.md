@@ -1,6 +1,6 @@
 ## Before and after
 
-Editing raw photos in the culling view with and without this fork's fixes, on the laptop described below. The animations play in real time.
+Editing raw photos in the culling view with and without this fork's fixes, on the laptop described below. The animations play in real time. They were recorded on RapidRAW 1.6.5, before the biggest fixes went upstream, so 1.6.7 itself is already much closer to the "after" recording.
 
 **Before:**
 
@@ -13,36 +13,26 @@ Editing raw photos in the culling view with and without this fork's fixes, on th
 Full-resolution recordings: [before.mp4](docs/fork/before.mp4), [after.mp4](docs/fork/after.mp4).
 
 > [!NOTE]
-> **About this fork:** based on RapidRAW 1.6.5, it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests, starting with [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790). Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
+> **About this fork:** based on RapidRAW 1.6.7, it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests. The first two, [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790) and [#1959](https://github.com/CyberTimon/RapidRAW/pull/1959), are merged and part of RapidRAW 1.6.7. Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
 
 ## Performance fixes in this fork
 
-On the laptop above, opening a 12 MP raw went from 6.4 s to about 0.4 s, and exporting 12 raws as TIFF or JPEG from 23–26 s to about 6 s. Applying a style to an open photo takes 8–20 ms. After rebasing onto RapidRAW 1.6.5, with 43 days of uptime and fragmented memory, exporting 14 raws took 73–121 s with upstream and 8–12 s with this fork. Timings below are for 12 MP Sony A7S II and 26 MP Sony a6700 raws.
+Measured with `rapidraw bench` on a 12 MP Sony A7S II and a 26 MP Sony a6700 raw, compared with RapidRAW 1.6.7: a preview after a style change is 2.5× faster, a full-resolution preview 1.8×, the live preview while dragging a slider 1.7×, a preview after a rotation change 1.5× and the first preview after opening a photo 1.4×, with identical output in every step.
 
-- **No memory compaction stalls on Linux:** mimalloc no longer asks for transparent huge pages. On a system with fragmented memory, the kernel otherwise spent 1–2 s compacting memory each time a new image buffer was touched. Opening a 12 MP raw: 6.4 s → 0.86 s.
-- **Parallel raw post-processing:** highlight recovery and pixel format conversions use all CPU cores. Opening a 12 MP raw: 0.89 s → 0.40 s.
-- **Vectorized raw enhancement:** colour noise reduction and detail enhancement process eight pixels at a time, with AVX2 when the CPU supports it. Raw enhancement of a 26 MP raw: ~260 ms → ~94 ms.
-- **Fewer full-image copies in raw enhancement:** ~230 ms → ~170–200 ms for a 26 MP raw.
-- **Raws decoded straight to RGB:** the decoded raw was converted to RGBA and back to RGB. Skipping that saves ~50 ms per 26 MP raw.
-- **Parallel rotation and flipping:** rotating a 26 MP portrait photo: 97 ms → 40 ms.
-- **Reliable decoded-image cache:** a cached decode is reused only while the file and the raw processing settings are unchanged, which fixes stale previews for tethered shots that reuse file names. Full-resolution previews in the culling view, negative conversion and collage now reuse it: 394 ms → 153 ms for a 12 MP raw.
-- **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Decoding the next photo when you open it: 247 ms → 0.3 ms. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
-- **Previews encoded in parallel:** preview JPEGs are encoded in strips on all CPU cores and joined with restart markers. Full-resolution preview of a 26 MP raw: ~374 ms → ~165 ms. Slider update: ~21 ms → ~12 ms.
-- **One GPU processor for portrait and landscape:** alternating between portrait and landscape photos no longer rebuilds the GPU processor and its full-size textures on every switch.
-- **Faster geometry steps:** lens correction, perspective, rotation and crop copy less and use all CPU cores. With a perspective correction on a 26 MP raw, the full-resolution transform: ~110–210 ms → ~80–135 ms.
-- **Live slider previews in the culling view:** dragging a slider updates the photo continuously, as in the editor, instead of only after release. After release the photo shows the change in about 0.15 s instead of about 0.5 s, and the full-resolution render waits until no slider is being dragged. On Windows and macOS this applies when the wgpu renderer is turned off.
-- **No hidden renders behind the editor:** with the library in culling mode, the hidden culling view re-rendered the photo at full resolution after every edit in the editor, about 0.6 s of GPU work per edit for a 26 MP raw. It now waits until the library is shown again.
+- **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
+- **Previews encoded in parallel:** preview JPEGs are encoded in strips on all CPU cores and joined with restart markers. This makes full-resolution previews and slider updates faster.
+- **Faster rotation and crop:** both copy pixels on all CPU cores. In the benchmark, rotation is 1.4× and crop 1.7× faster.
+- **Parallel rotation and flipping of non-raw photos:** JPEG, PNG and TIFF files with an EXIF orientation are rotated on all CPU cores. Rotating a 24 MP JPEG by 90°: ~62 ms → ~10 ms.
+- **Live slider previews in the culling view:** dragging a slider updates the photo continuously, as in the editor, instead of only after release, and the full-resolution render waits until no slider is being dragged. On Windows and macOS this applies when the wgpu renderer is turned off.
+- **No hidden renders behind the editor:** with the library in culling mode, the hidden culling view re-rendered the photo at full resolution after every edit in the editor. It now waits until the library is shown again.
 - **Culling view shows the editor's render while loading:** moving to a photo that wasn't preloaded shows its screen-sized editor render as soon as the raw is decoded, instead of only the thumbnail until the full-resolution preview arrives.
 
-RapidRAW 1.6.5 itself now skips GPU blurs that no adjustment uses and avoids copying unedited images, so earlier builds' fixes for those are no longer part of this fork.
-
-Measured with `rapidraw bench` on a 12 MP and a 26 MP raw, compared with upstream: opening a photo is 29× faster, a full-resolution preview 49×, a JPEG export 10× and a preview after a style change 1.9×, with identical output in every step.
+Now in upstream RapidRAW: the fix for multi-second memory compaction stalls on Linux, parallel raw post-processing and the reliable decoded-image cache (from #1790 and #1959). RapidRAW 1.6.7 also does several things itself that earlier builds of this fork did: it skips GPU blurs that no adjustment uses, avoids copying unedited images, decodes raws straight to RGB, rotates raws in parallel, keeps one GPU processor for portrait and landscape photos, and has a rewritten raw noise reduction. Those fixes are no longer part of this fork.
 
 Tools added for this work:
 
 - `rapidraw bench` times the internal functions of the image pipeline on real photos, from raw decoding to export, and checks that their output stays the same. It is the first change on this fork's main, so `bench/bench-commits.sh` can benchmark each feature merge after it. See [bench/pipeline-bench.md](bench/pipeline-bench.md).
-- `bench/compare-renders.sh` exports a folder with two builds, compares their export times and checks that the files are byte-identical. See [bench/README.md](bench/README.md).
-- The log names the GPU adapter and backend in use, which shows a silent fallback from Vulkan to the slower GL backend.
+- `bench/compare-renders.sh` (now in upstream) exports a folder with two builds, compares their export times and checks that the files are byte-identical. See [bench/README.md](bench/README.md).
 
 The code is 100% AI-generated with Claude Code. It was checked with byte-for-byte comparisons against upstream and tested by hand on raw photos from a Sony A7S II and a Sony a6700.
 
