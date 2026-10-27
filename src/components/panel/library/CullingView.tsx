@@ -27,7 +27,7 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useProcessStore } from '../../../store/useProcessStore';
-import { loadCullingPreview } from '../../../utils/cullingPreview';
+import { isCullingPreviewPending, loadCullingPreview } from '../../../utils/cullingPreview';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useUIStore } from '../../../store/useUIStore';
@@ -318,7 +318,12 @@ function CullingPreview({
         });
     };
 
-    const delay = lastLiveEditRef.current ? EDITED_PREVIEW_DELAY_MS : 200;
+    // A preview that is already being rendered (preloaded) is joined right away.
+    const delay = isCullingPreviewPending(image.path, safeThumbKey)
+      ? 0
+      : lastLiveEditRef.current
+        ? EDITED_PREVIEW_DELAY_MS
+        : 200;
     let delayTimeout = setTimeout(load, delay);
 
     return () => {
