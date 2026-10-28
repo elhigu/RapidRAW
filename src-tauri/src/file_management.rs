@@ -518,8 +518,15 @@ pub async fn read_exif_for_paths(
             }
         };
 
+        // The reads wait on I/O, for long on a network share, so they get their own threads and don't
+        // hold up thumbnails and previews on the global pool.
         let exif_data: HashMap<String, HashMap<String, String>> = if is_hdd {
             paths.iter().filter_map(process_path).collect()
+        } else if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+            .num_threads(rayon::current_num_threads())
+            .build()
+        {
+            pool.install(|| paths.par_iter().filter_map(process_path).collect())
         } else {
             paths.par_iter().filter_map(process_path).collect()
         };
