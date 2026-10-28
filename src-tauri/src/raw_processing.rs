@@ -16,6 +16,7 @@ use rawler::{
     rawsource::RawSource,
 };
 use rayon::prelude::*;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -47,15 +48,38 @@ fn metadata_orientation(decoder: &dyn Decoder, source: &RawSource) -> Result<Ori
         .unwrap_or(Orientation::Normal))
 }
 
+// RawSource copies the whole buffer it is given. Metadata and embedded previews sit near the start
+// of most raws, so try growing prefixes first to avoid reading all of a raw on a network share.
+// read gets whether it was given the whole file.
+pub fn read_from_prefix<T>(
+    file_bytes: &[u8],
+    read: impl Fn(&[u8], bool) -> Option<T>,
+) -> Option<T> {
+    let mut len = 256 * 1024;
+    while len < file_bytes.len() {
+        if let Ok(Some(found)) = catch_unwind(AssertUnwindSafe(|| read(&file_bytes[..len], false)))
+        {
+            return Some(found);
+        }
+        len *= 4;
+    }
+    read(file_bytes, true)
+}
+
 pub fn extract_embedded_preview(file_bytes: &[u8]) -> Option<DynamicImage> {
-    let source = RawSource::new_from_slice(file_bytes);
-    let decoder = rawler::get_decoder(&source).ok()?;
-    let preview = decoder
-        .full_image(&source, &RawDecodeParams::default())
-        .ok()??;
-    let orientation =
-        metadata_orientation(decoder.as_ref(), &source).unwrap_or(Orientation::Normal);
-    Some(apply_orientation(preview, orientation))
+    read_from_prefix(file_bytes, |bytes, whole_file| {
+        let source = RawSource::new_from_slice(bytes);
+        let decoder = rawler::get_decoder(&source).ok()?;
+        let preview = decoder
+            .full_image(&source, &RawDecodeParams::default())
+            .ok()??;
+        let orientation = match metadata_orientation(decoder.as_ref(), &source) {
+            Ok(orientation) => orientation,
+            Err(_) if whole_file => Orientation::Normal,
+            Err(_) => return None,
+        };
+        Some(apply_orientation(preview, orientation))
+    })
 }
 
 fn is_linear_raw_format(raw_image: &RawImage) -> bool {
