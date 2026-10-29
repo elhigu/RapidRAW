@@ -158,3 +158,6 @@ fn join_strips(parts: &[Vec<u8>], height: usize, restart_interval: u16) -> Optio
     out.extend_from_slice(&[0xFF, EOI]);
     Some(out)
 }
+
+#[cfg(test)]
+mod tests;
