@@ -1,6 +1,6 @@
 ## Before and after
 
-Editing raw photos in the culling view with and without this fork's fixes, on the laptop described below. The animations play in real time. They were recorded on RapidRAW 1.6.5, before the biggest fixes went upstream, so 1.6.7 itself is already much closer to the "after" recording.
+Editing raw photos in the culling view with and without this fork's fixes, on the laptop described below. The animations play in real time. They were recorded on RapidRAW 1.6.5, before most of the fixes went upstream, so upstream RapidRAW itself is now much closer to the "after" recording.
 
 **Before:**
 
@@ -14,29 +14,25 @@ Full-resolution recordings: [before.mp4](docs/fork/before.mp4), [after.mp4](docs
 
 ### Opening a folder on a network share
 
-Opening a folder of 604 raws for the first time from a Samba share mounted by GNOME, with the network limited to 1 Gbit. The folder holds copies of two 26 MP Sony a6700 raws, 24 GB in all. Upstream RapidRAW (top) reads every raw in full: the visible thumbnails are complete after 224 s, and 26 GB is transferred. With this fork's network share fix (bottom), they are complete after 1.4 s, and 211 MB is transferred. Each counter shows the seconds since the click. The animation plays in real time for the first 10 s, then at 16× speed.
+Opening a folder of 604 raws for the first time from a Samba share mounted by GNOME, with the network limited to 1 Gbit. The folder holds copies of two 26 MP Sony a6700 raws, 24 GB in all. RapidRAW 1.6.7 (top) reads every raw in full: the visible thumbnails are complete after 224 s, and 26 GB is transferred. With the network share fix (bottom), now merged upstream as #2054, they are complete after 1.4 s, and 211 MB is transferred. Each counter shows the seconds since the click. The animation plays in real time for the first 10 s, then at 16× speed.
 
 [![Opening a folder on a network share without and with the fix](docs/fork/network-share.webp)](docs/fork/network-share.mp4)
 
 Full-resolution recordings: [network-share.mp4](docs/fork/network-share.mp4), [network-share-realtime.mp4](docs/fork/network-share-realtime.mp4) (real time throughout).
 
 > [!NOTE]
-> **About this fork:** based on RapidRAW 1.6.7, it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests. The first two, [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790) and [#1959](https://github.com/CyberTimon/RapidRAW/pull/1959), are merged and part of RapidRAW 1.6.7. Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
+> **About this fork:** based on upstream RapidRAW's main branch after 1.6.7, it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests. Five are merged: [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790) and [#1959](https://github.com/CyberTimon/RapidRAW/pull/1959) are part of RapidRAW 1.6.7, and [#2054](https://github.com/CyberTimon/RapidRAW/pull/2054), [#2056](https://github.com/CyberTimon/RapidRAW/pull/2056) and [#2060](https://github.com/CyberTimon/RapidRAW/pull/2060) are in the main branch for the next release. Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
 
 ## Performance fixes in this fork
 
-Measured with `rapidraw bench` on a 12 MP Sony A7S II and a 26 MP Sony a6700 raw, compared with RapidRAW 1.6.7: a preview after a style change is 2.5× faster, a full-resolution preview 1.8×, the live preview while dragging a slider 1.7×, a preview after a rotation change 1.5× and the first preview after opening a photo 1.4×, with identical output in every step.
+Most of this fork's speedups are now part of upstream RapidRAW (see below). Measured with `rapidraw bench` on a 12 MP Sony A7S II and a 26 MP Sony a6700 raw, this fork's image pipeline runs at the same speed as upstream's main branch. What the fork still adds is mostly in the culling view and in moving from photo to photo, which the benchmark doesn't measure:
 
 - **Preloading of the next and previous photo:** while you look at a photo, its neighbours are decoded in the background, and in the culling view also rendered, so the arrow keys show them right away. Active when the Decoded Image Cache setting is 4 or more (the default is 5).
-- **Previews encoded in parallel:** preview JPEGs are encoded in strips on all CPU cores and joined with restart markers. This makes full-resolution previews and slider updates faster.
-- **Faster rotation and crop:** both copy pixels on all CPU cores. In the benchmark, rotation is 1.4× and crop 1.7× faster.
-- **Parallel rotation and flipping of non-raw photos:** JPEG, PNG and TIFF files with an EXIF orientation are rotated on all CPU cores. Rotating a 24 MP JPEG by 90°: ~62 ms → ~10 ms.
 - **Live slider previews in the culling view:** dragging a slider updates the photo continuously, as in the editor, instead of only after release, and the full-resolution render waits until no slider is being dragged. On Windows and macOS this applies when the wgpu renderer is turned off.
 - **No hidden renders behind the editor:** with the library in culling mode, the hidden culling view re-rendered the photo at full resolution after every edit in the editor. It now waits until the library is shown again.
 - **Culling view shows the editor's render while loading:** moving to a photo that wasn't preloaded shows its screen-sized editor render as soon as the raw is decoded, instead of only the thumbnail until the full-resolution preview arrives.
-- **Folders on network shares:** opening a folder read every raw in full for its EXIF data and thumbnail, and opening a raw read it again for its white balance. From a Samba share over a 1 Gbit network, the first opening of a folder of 604 raws took 82 s and transferred 11 GB; now its thumbnails show in about 2 s, close to the 1.6 s from a local disk. EXIF data and embedded previews are read from the start of the file, only as far as needed, and the EXIF reads no longer hold up thumbnail processing. Thumbnails and EXIF data stay identical, checked with raws from 13 camera makers.
 
-Now in upstream RapidRAW: the fix for multi-second memory compaction stalls on Linux, parallel raw post-processing and the reliable decoded-image cache (from #1790 and #1959). RapidRAW 1.6.7 also does several things itself that earlier builds of this fork did: it skips GPU blurs that no adjustment uses, avoids copying unedited images, decodes raws straight to RGB, rotates raws in parallel, keeps one GPU processor for portrait and landscape photos, and has a rewritten raw noise reduction. Those fixes are no longer part of this fork.
+Now in upstream RapidRAW: the fix for multi-second memory compaction stalls on Linux, parallel raw post-processing and the reliable decoded-image cache (from #1790 and #1959, in 1.6.7), and, merged into the main branch for the next release, fast folders on network shares (#2054), GPU shaders compiled once instead of every time the GPU processor grows (#2056) and preview JPEGs encoded on all CPU cores (#2060). RapidRAW 1.6.7 also does several things itself that earlier builds of this fork did: it skips GPU blurs that no adjustment uses, avoids copying unedited images, decodes raws straight to RGB, rotates raws in parallel, keeps one GPU processor for portrait and landscape photos, and has a rewritten raw noise reduction. Those fixes are no longer part of this fork.
 
 Tools added for this work:
 
