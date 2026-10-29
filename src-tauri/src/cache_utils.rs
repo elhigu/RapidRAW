@@ -766,3 +766,6 @@ pub fn clear_session_caches(state: tauri::State<AppState>) {
         geometry_cache.clear();
     }
 }
+
+#[cfg(test)]
+mod active_image_tests;
