@@ -14,17 +14,11 @@ Full-resolution recordings: [before.mp4](docs/fork/before.mp4), [after.mp4](docs
 
 ### Opening a folder on a network share
 
-Opening a folder of 604 raws for the first time from a Samba share mounted by GNOME, with the network limited to 1 Gbit. The folder holds copies of two 26 MP Sony a6700 raws, 24 GB in all. Upstream RapidRAW reads every raw in full: the visible thumbnails are complete after 224 s, and 26 GB is transferred. With this fork's network share fix, they are complete after about 2 s, and 211 MB is transferred. The counter shows the seconds since the click. The "before" animation plays in real time for the first 10 s, then at 16× speed.
+Opening a folder of 604 raws for the first time from a Samba share mounted by GNOME, with the network limited to 1 Gbit. The folder holds copies of two 26 MP Sony a6700 raws, 24 GB in all. Upstream RapidRAW (top) reads every raw in full: the visible thumbnails are complete after 224 s, and 26 GB is transferred. With this fork's network share fix (bottom), they are complete after 1.4 s, and 211 MB is transferred. Each counter shows the seconds since the click. The animation plays in real time for the first 10 s, then at 16× speed.
 
-**Before:**
+[![Opening a folder on a network share without and with the fix](docs/fork/network-share.webp)](docs/fork/network-share.mp4)
 
-[![Opening a folder on a network share without the fix](docs/fork/network-share-before.webp)](docs/fork/network-share-before.mp4)
-
-**After:**
-
-[![Opening a folder on a network share with the fix](docs/fork/network-share-after.webp)](docs/fork/network-share-after.mp4)
-
-Full-resolution recordings: [network-share-before.mp4](docs/fork/network-share-before.mp4), [network-share-before-realtime.mp4](docs/fork/network-share-before-realtime.mp4) (real time throughout), [network-share-after.mp4](docs/fork/network-share-after.mp4).
+Full-resolution recordings: [network-share.mp4](docs/fork/network-share.mp4), [network-share-realtime.mp4](docs/fork/network-share-realtime.mp4) (real time throughout).
 
 > [!NOTE]
 > **About this fork:** based on RapidRAW 1.6.7, it fixes performance bottlenecks found on Linux on an AMD Ryzen AI 9 laptop (Ryzen AI 9 HX 375 with Radeon 890M). Most of the fixes are not specific to that hardware, so RapidRAW should be faster on other systems too. None of them changes how photos look: exported images were checked to be byte-identical to upstream, and previews decode to the same pixels. The fixes are offered upstream as separate pull requests. The first two, [#1790](https://github.com/CyberTimon/RapidRAW/pull/1790) and [#1959](https://github.com/CyberTimon/RapidRAW/pull/1959), are merged and part of RapidRAW 1.6.7. Only Linux builds have been tested. Linux downloads with all the fixes are on this fork's [Releases page](https://github.com/elhigu/RapidRAW/releases).
