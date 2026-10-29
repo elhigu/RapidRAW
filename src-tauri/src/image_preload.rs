@@ -129,3 +129,6 @@ pub fn preload_images(paths: Vec<String>, state: tauri::State<'_, AppState>) {
         let _ = tx.send(PreloadJob { paths, generation });
     }
 }
+
+#[cfg(test)]
+mod tests;
