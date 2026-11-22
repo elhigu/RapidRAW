@@ -22,6 +22,7 @@ macro_rules! cli_eprintln {
 mod adjustments;
 mod ai;
 mod app;
+mod bench;
 mod decode;
 mod effects;
 mod export;

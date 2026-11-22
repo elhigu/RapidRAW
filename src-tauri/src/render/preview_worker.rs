@@ -24,7 +24,7 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, ipc::InvokeResponseBody};
 
 #[allow(clippy::too_many_arguments)]
-fn process_preview_job(
+pub(crate) fn process_preview_job(
     app_handle: &tauri::AppHandle,
     state: tauri::State<AppState>,
     mut adjustments_json: serde_json::Value,
