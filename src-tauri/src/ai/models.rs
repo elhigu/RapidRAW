@@ -575,6 +575,7 @@ fn create_session(
     fixed_dims: &[(&str, i64)],
 ) -> Result<Session> {
     let use_gpu = gpu_provider.is_some();
+    let model = crate::ai::onnx_rewrite::optimized_model(model_path, use_gpu);
     let cpu_provider = CPUExecutionProvider::default()
         .with_arena_allocator(kind == SessionKind::Persistent)
         .build();
@@ -593,14 +594,20 @@ fn create_session(
     let builder = builder.with_execution_providers(providers)?;
     match gpu_patch {
         Some(patch) => {
-            let (model, outputs) = patch()?;
-            let mut session = builder.edit_from_file(model_path)?;
-            session.apply_model(&model)?;
+            let (patch, outputs) = patch()?;
+            let mut session = match &model {
+                Some(model) => builder.edit_from_memory(model)?,
+                None => builder.edit_from_file(model_path)?,
+            };
+            session.apply_model(&patch)?;
             let mut session = session.into_session()?;
             session.outputs = outputs;
             Ok(session)
         }
-        None => Ok(builder.commit_from_file(model_path)?),
+        None => match &model {
+            Some(model) => Ok(builder.commit_from_memory(model)?),
+            None => Ok(builder.commit_from_file(model_path)?),
+        },
     }
 }
 
