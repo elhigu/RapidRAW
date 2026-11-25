@@ -63,7 +63,10 @@ rewrite("original.onnx", "rewritten.onnx")
 L = ort.GraphOptimizationLevel
 cases = [("CPU", ["CPUExecutionProvider"], L.ORT_ENABLE_ALL), ("CPU, NCHWc off", ["CPUExecutionProvider"], L.ORT_ENABLE_EXTENDED)]
 if "CoreMLExecutionProvider" in ort.get_available_providers():
-    cases.append(("CoreML", ["CoreMLExecutionProvider", "CPUExecutionProvider"], L.ORT_ENABLE_ALL))
+    cases.append(("CoreML, as in the app (MLProgram, all compute units)",
+                  [("CoreMLExecutionProvider", {"ModelFormat": "MLProgram", "MLComputeUnits": "ALL"}),
+                   "CPUExecutionProvider"], L.ORT_ENABLE_ALL))
+    cases.append(("CoreML, default settings", ["CoreMLExecutionProvider", "CPUExecutionProvider"], L.ORT_ENABLE_ALL))
 label = os.environ.get("LABEL", platform.platform())
 lines = [f"### {label}: {cpu_name()}, {os.cpu_count()} threads, ONNX Runtime {ort.__version__}", "",
          "| Runs on | Original | Rewritten | Change | Max diff |", "|---|---|---|---|---|"]

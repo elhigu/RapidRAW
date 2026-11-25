@@ -8,8 +8,7 @@ jobs:
         include:
           - { os: macos-latest, label: "macOS Apple Silicon", ort: "1.22.0" }
           - { os: macos-latest, label: "macOS Apple Silicon", ort: "1.32.0" }
-          - { os: macos-14, label: "macOS Apple Silicon", ort: "1.22.0" }
-          - { os: windows-11-arm, label: "Windows ARM", ort: "1.32.0" }
+          - { os: macos-15-intel, label: "macOS Intel", ort: "1.22.0" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
