@@ -1,0 +1,28 @@
+name: Denoise rewrite benchmark
+on: push
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, label: "Linux x86-64", ort: "1.22.0" }
+          - { os: ubuntu-24.04, label: "Linux x86-64", ort: "1.32.0" }
+          - { os: ubuntu-24.04-arm, label: "Linux ARM", ort: "1.22.0" }
+          - { os: ubuntu-24.04-arm, label: "Linux ARM", ort: "1.32.0" }
+          - { os: macos-15, label: "macOS Apple Silicon", ort: "1.22.0" }
+          - { os: macos-15, label: "macOS Apple Silicon", ort: "1.32.0" }
+          - { os: macos-15-intel, label: "macOS Intel", ort: "1.22.0" }
+          - { os: windows-latest, label: "Windows x86-64", ort: "1.22.0" }
+          - { os: windows-11-arm, label: "Windows ARM", ort: "1.32.0" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install "onnxruntime==${{ matrix.ort }}" onnx "numpy<2.3"
+      - run: curl -fsSL -o original.onnx "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/nind_denoise_utnet_684.onnx?download=true"
+      - run: python bench.py
+        env:
+          LABEL: ${{ matrix.label }}
