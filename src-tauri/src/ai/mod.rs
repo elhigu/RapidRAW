@@ -11,3 +11,5 @@ pub mod onnx_rewrite;
 pub mod processing;
 pub mod tiling;
 pub mod upscale;
+#[cfg(target_os = "linux")]
+pub mod webgpu;

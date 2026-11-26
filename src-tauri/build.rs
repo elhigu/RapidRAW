@@ -97,11 +97,7 @@ fn runtime_libraries(
                 "77b0db83ff903f2323f5caf538499d75af6038bbea23b7959f7d232d9a4ab9d4",
             ),
         ],
-        ("linux", "x86_64") => vec![(
-            "libonnxruntime-linux-x86_64.so",
-            "libonnxruntime.so",
-            "3da6146e14e7b8aaec625dde11d6114c7457c87a5f93d744897da8781e35c673",
-        )],
+        ("linux", "x86_64") => vec![],
         ("linux", "aarch64") => vec![(
             "libonnxruntime-linux-aarch64.so",
             "libonnxruntime.so",
@@ -124,6 +120,71 @@ fn runtime_libraries(
         )],
         _ => panic!("Unsupported target: {}-{}", target_os, target_arch),
     }
+}
+
+struct WheelLibrary {
+    url: &'static str,
+    wheel_sha256: &'static str,
+    member: &'static str,
+    lib_name: &'static str,
+    sha256: &'static str,
+}
+
+fn wheel_libraries(target_os: &str, target_arch: &str) -> Vec<WheelLibrary> {
+    match (target_os, target_arch) {
+        ("linux", "x86_64") => vec![
+            WheelLibrary {
+                url: "https://files.pythonhosted.org/packages/92/74/1f7c51522822e93aa91f633ebcd75688e2deebeca5901b2e6da8a8c5ad7c/onnxruntime-1.32.0-cp313-cp313-manylinux_2_28_x86_64.whl",
+                wheel_sha256: "02ea12a28c069ea8510093d95a7f6ff8126bfd9fc5c0d3381c03b80fb2b424ba",
+                member: "onnxruntime/capi/libonnxruntime.so.1.32.0",
+                lib_name: "libonnxruntime.so",
+                sha256: "6c1585d1bbf45b0712ea4a21b705c5fcb4ba04ff2e30f1fbf81a49faf658638f",
+            },
+            WheelLibrary {
+                url: "https://files.pythonhosted.org/packages/e2/1d/ac0ccbe8bd6435b6e1946fea964790ffa3d73ee2513775e90958fd6b860e/onnxruntime_ep_webgpu-0.5.0-py3-none-manylinux_2_28_x86_64.whl",
+                wheel_sha256: "b6baa3e223d9a679023388b1179e5597b6bc0d282ba72f2afe38d46ef37deeb4",
+                member: "onnxruntime_ep_webgpu/libonnxruntime_providers_webgpu.so",
+                lib_name: "libonnxruntime_providers_webgpu.so",
+                sha256: "fc98b10c7d03537694ff4ea6ebca79ed3b41ca71e316dac3292257ee5f85c95d",
+            },
+        ],
+        _ => vec![],
+    }
+}
+
+fn ensure_wheel_library(dest_dir: &Path, library: &WheelLibrary) -> PathBuf {
+    let dest_path = dest_dir.join(library.lib_name);
+    if verify_sha256(&dest_path, library.sha256).unwrap_or(false) {
+        return dest_path;
+    }
+    let wheel_name = library.url.rsplit('/').next().unwrap();
+    let wheel_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set")).join("wheels");
+    let wheel_path = wheel_dir.join(wheel_name);
+    let local_path = env::var_os("RAPIDRAW_RUNTIME_DIR")
+        .map(|dir| PathBuf::from(dir).join(wheel_name))
+        .filter(|path| path.exists());
+    let result = fs::create_dir_all(&wheel_dir)
+        .map_err(Into::into)
+        .and_then(|()| match local_path {
+            Some(local_path) => copy_and_verify(&local_path, &wheel_path, library.wheel_sha256),
+            None => download_and_verify(library.url, &wheel_path, library.wheel_sha256),
+        })
+        .and_then(|()| {
+            let mut wheel = zip::ZipArchive::new(fs::File::open(&wheel_path)?)?;
+            io::copy(
+                &mut wheel.by_name(library.member)?,
+                &mut fs::File::create(&dest_path)?,
+            )?;
+            if !verify_sha256(&dest_path, library.sha256)? {
+                return Err(format!("{} has an incorrect hash", library.member).into());
+            }
+            Ok(())
+        });
+    if let Err(e) = result {
+        panic!("Failed to download and verify {}: {}", library.lib_name, e);
+    }
+    println!("cargo:warning=Extracted and verified {:?}.", dest_path);
+    dest_path
 }
 
 fn copy_and_verify(
@@ -216,6 +277,11 @@ fn main() {
         .map(|(download_filename, lib_name, expected_hash)| {
             ensure_runtime_library(&dest_dir, download_filename, lib_name, expected_hash)
         })
+        .chain(
+            wheel_libraries(&target_os, &target_arch)
+                .iter()
+                .map(|library| ensure_wheel_library(&dest_dir, library)),
+        )
         .collect();
 
     if target_os == "android" {

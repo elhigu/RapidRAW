@@ -28,6 +28,7 @@ patch.txt
 
 # dynamic libraries downloaded by 'ort' crate at build time
 src-tauri/resources/libonnxruntime.so
+src-tauri/resources/libonnxruntime_providers_webgpu.so
 src-tauri/resources/libonnxruntime.dylib
 src-tauri/resources/onnxruntime.dll
 src-tauri/resources/DirectML.dll

@@ -1436,7 +1436,7 @@ export default function SettingsPanel({
                               <li>{t('settings.processing.ai.cpu.feature2')}</li>
                               <li>{t('settings.processing.ai.cpu.feature3')}</li>
                             </Text>
-                            {(osPlatform === 'windows' || osPlatform === 'macos') && (
+                            {(osPlatform === 'windows' || osPlatform === 'macos' || osPlatform === 'linux') && (
                               <div className="mt-8">
                                 <SettingItem
                                   label={t('settings.processing.ai.cpu.gpuAcceleration')}

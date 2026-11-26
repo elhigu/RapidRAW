@@ -1,31 +1,40 @@
-//! Makes AI models run faster on x86-64 CPUs by replacing their stride-1 `ConvTranspose` layers
-//! with `Conv` layers that compute the same result. Every model goes through `optimized_model` when
-//! it is loaded, which uses the rewrite only where it was measured to help (see the table below).
-//! Of the current models, only the denoise model has such layers. The model is changed in memory;
-//! the file on disk is not changed.
+//! Makes AI models run faster on x86-64 CPUs and on WebGPU by replacing their `ConvTranspose`
+//! layers with `Conv` layers that compute the same result. Every model goes through
+//! `optimized_model` when it is loaded, which uses the rewrite only where it was measured to help
+//! (see the tables below). Of the current models, the denoise model, the SAM3 image encoder and
+//! MoGe have such layers. The model is changed in memory; the file on disk is not changed.
 //!
 //! Why: the denoise model spends most of its time in `ConvTranspose` layers. On x86-64 CPUs, ONNX
 //! Runtime runs `Conv` layers with its fastest kernels, which use its "NCHWc" memory layout: the
 //! image is stored in blocks of 8 or 16 channels, so one SIMD instruction works on the same pixel
 //! in 8 or 16 channels at once. ONNX Runtime has no such kernels for `ConvTranspose`, and it
 //! doesn't make this replacement by itself. On ARM CPUs the rewrite makes no difference, and on
-//! Apple Silicon it is slower, so it's only used on x86-64 CPUs. It's not used with DirectML or
-//! CoreML either. Measured time for one 504×504 denoise tile, with the original and the rewritten
-//! model:
+//! Apple Silicon it is slower, so on the CPU it's only used on x86-64. On WebGPU, ONNX Runtime runs
+//! `Conv` as a tiled matrix multiply, but `ConvTranspose` with a simple shader that computes each
+//! output pixel on its own, which is several times slower. WebGPU is only used on Linux. The
+//! rewrite is not used with DirectML or CoreML. Measured time for one 504×504 denoise tile, with
+//! the original model, with the stride-1 layers replaced (stride 1), and with the stride-1 and
+//! stride-2 layers replaced (stride 1+2):
 //!
 //! ```text
-//! Hardware, OS                   Runs on   ORT   Original  Rewritten  Change  Used
-//! Ryzen AI 9 HX 375, Linux       CPU       1.32  0.93 s    0.75 s     -19%    yes
-//! Xeon 6975P, Linux (CI)         CPU       1.22  1.26 s    0.95 s     -24%    yes
-//! Core i7-8700B, macOS (CI)      CPU       1.22  2.86 s    2.15 s     -25%    yes
-//! EPYC 7763, Windows (CI)        CPU       1.22  2.42 s    2.30 s     -5%     yes
-//! Neoverse-N2, Linux (CI)        CPU       1.22  1.99 s    1.97 s     -1%     no
-//! Cobalt 100, Windows (CI)       CPU       1.32  2.02 s    2.00 s     -1%     no
-//! Apple M2 Pro, macOS (CI)       CPU       1.22  2.04 s    2.42 s     +18%    no
-//! Apple M2 Pro, macOS (CI)       CoreML    1.32  0.45 s    0.44 s     -1%     no
-//! Core i7-8700B, macOS (CI)      CoreML    1.22  2.08 s    1.86 s     -10%    no
-//! NVIDIA/AMD/Intel GPU, Windows  DirectML  not tested                         no
+//! Hardware, OS                   Runs on   ORT   Original  Stride 1  Stride 1+2  Used
+//! Ryzen AI 9 HX 375, Linux       CPU       1.32  0.93 s    0.75 s    0.85 s      stride 1
+//! Radeon 890M, Linux             WebGPU    1.32  1.73 s    0.34 s    0.27 s      stride 1+2
+//! Xeon 6975P, Linux (CI)         CPU       1.22  1.26 s    0.95 s                stride 1
+//! Core i7-8700B, macOS (CI)      CPU       1.22  2.86 s    2.15 s                stride 1
+//! EPYC 7763, Windows (CI)        CPU       1.22  2.42 s    2.30 s                stride 1
+//! Neoverse-N2, Linux (CI)        CPU       1.22  1.99 s    1.97 s                no
+//! Cobalt 100, Windows (CI)       CPU       1.32  2.02 s    2.00 s                no
+//! Apple M2 Pro, macOS (CI)       CPU       1.22  2.04 s    2.42 s                no
+//! Apple M2 Pro, macOS (CI)       CoreML    1.32  0.45 s    0.44 s                no
+//! Core i7-8700B, macOS (CI)      CoreML    1.22  2.08 s    1.86 s                no
+//! NVIDIA or Intel GPU, Linux     WebGPU    not tested                            stride 1+2
+//! NVIDIA/AMD/Intel GPU, Windows  DirectML  not tested                            no
 //! ```
+//!
+//! The SAM3 image encoder and MoGe have only stride-2 layers, so they are rewritten only for
+//! WebGPU. On the Radeon 890M, the SAM3 image encoder took 0.26 s instead of 0.74 s for a
+//! 1008×1008 image, and MoGe 0.93 s instead of 0.94 s.
 //!
 //! ORT is the ONNX Runtime version. Rows marked (CI) were measured on GitHub Actions runners,
 //! which are virtual machines with 3 to 5 threads, because we don't have that hardware. CoreML
@@ -33,10 +42,10 @@
 //! platforms, so that the rewrite can be used wherever it helps. To measure, save the rewritten
 //! model to a file and time one tile with both models in ONNX Runtime.
 //!
-//! How: a `Conv` computes each output pixel from its neighbouring input pixels. A `ConvTranspose`
-//! does the opposite: it spreads each input pixel to its neighbouring output pixels. With stride 1
-//! both add up the same products, only with the kernel in the opposite order. For a 3-wide kernel
-//! `[a b c]` and padding 1:
+//! How, stride 1: a `Conv` computes each output pixel from its neighbouring input pixels. A
+//! `ConvTranspose` does the opposite: it spreads each input pixel to its neighbouring output
+//! pixels. With stride 1 both add up the same products, only with the kernel in the opposite order.
+//! For a 3-wide kernel `[a b c]` and padding 1:
 //!
 //! ```text
 //! ConvTranspose: x1 adds a*x1, b*x1, c*x1 to y0, y1, y2, and so on, so  y2 = c*x1 + b*x2 + a*x3
@@ -52,13 +61,26 @@
 //!   size,
 //! - the same bias.
 //!
+//! How, stride 2 (WebGPU only): a `ConvTranspose` with a 2×2 kernel, stride 2 and no padding
+//! turns each input pixel into its own 2×2 block of output pixels, and the blocks don't overlap.
+//! Each pixel of a block is a weighted sum of the channels of that one input pixel, which is what
+//! a 1×1 `Conv` computes. So the layer is replaced by a 1×1 `Conv` with four times as many output
+//! channels, one for each position in the block, and its bias repeated four times. A
+//! `DepthToSpace` after it then moves those channels into their 2×2 blocks. The same works for any
+//! kernel size that equals the stride. On the CPU this is slower than the original layer, so it's
+//! only used for WebGPU.
+//!
 //! Why the result stays the same: every output pixel still gets exactly the same products added
 //! together. Only the order of the additions can change, and that changes only floating-point
-//! rounding. On a denoise tile the largest difference was 3.6e-7.
+//! rounding. On a denoise tile on the CPU the largest difference was 3.6e-7. On WebGPU the
+//! rewritten denoise model, SAM3 image encoder and MoGe gave exactly the same output as the
+//! original ones.
 //!
-//! A layer is only replaced if it has stride 1, no groups, dilations, output padding or automatic
-//! padding, padding between 0 and `k - 1`, and float weights that no other layer uses, because
-//! the weights are changed in place. Everything else in the model is left as it is. The ONNX file
+//! A layer is only replaced if it has no groups, dilations, output padding or automatic padding,
+//! and float weights that no other layer uses, because the weights are changed in place. With
+//! stride 1 its padding must be between 0 and `k - 1`. With a larger stride its kernel must be
+//! square and the size of the stride, it must have no padding, and its bias, if it has one, must be
+//! float and used by no other layer. Everything else in the model is left as it is. The ONNX file
 //! format (protobuf) is read and written directly in this file.
 
 use anyhow::{Result, anyhow, bail, ensure};
@@ -220,6 +242,14 @@ enum Attribute {
     Other,
 }
 
+fn int_attribute(name: &str, value: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, ATTRIBUTE_NAME, name.as_bytes());
+    put_int(&mut out, ATTRIBUTE_I, value);
+    put_int(&mut out, ATTRIBUTE_TYPE, ATTRIBUTE_TYPE_INT);
+    out
+}
+
 fn ints_attribute(name: &str, values: &[i64]) -> Vec<u8> {
     let mut out = Vec::new();
     put_bytes(&mut out, ATTRIBUTE_NAME, name.as_bytes());
@@ -227,6 +257,14 @@ fn ints_attribute(name: &str, values: &[i64]) -> Vec<u8> {
         put_int(&mut out, ATTRIBUTE_INTS, value);
     }
     put_int(&mut out, ATTRIBUTE_TYPE, ATTRIBUTE_TYPE_INTS);
+    out
+}
+
+fn string_attribute(name: &str, value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    put_bytes(&mut out, ATTRIBUTE_NAME, name.as_bytes());
+    put_bytes(&mut out, ATTRIBUTE_S, value.as_bytes());
+    put_int(&mut out, ATTRIBUTE_TYPE, ATTRIBUTE_TYPE_STRING);
     out
 }
 
@@ -406,6 +444,7 @@ fn conv_transpose_as_conv(
     initializers: &mut [Initializer],
     index: &HashMap<String, usize>,
     uses: &HashMap<&str, usize>,
+    depth_to_space: bool,
 ) -> Result<Option<Vec<Node>>> {
     let attributes = node.attributes()?;
     let single_use = |name: &str| {
@@ -435,51 +474,108 @@ fn conv_transpose_as_conv(
     }
     let strides = ints_or(&attributes, "strides", &[1, 1]);
     let pads = ints_or(&attributes, "pads", &[0, 0, 0, 0]);
-    if strides != [1, 1] || pads.len() != 4 {
-        return Ok(None);
+    let w = initializers[weight].floats()?;
+    let name = node.name()?;
+
+    if strides == [1, 1] && pads.len() == 4 {
+        let kernel = [kh as i64, kw as i64, kh as i64, kw as i64];
+        if pads
+            .iter()
+            .zip(kernel)
+            .any(|(&pad, k)| pad < 0 || pad > k - 1)
+        {
+            return Ok(None);
+        }
+        let mut flipped = vec![0.0f32; w.len()];
+        for ci in 0..c_in {
+            for co in 0..c_out {
+                for y in 0..kh {
+                    for x in 0..kw {
+                        flipped[((co * c_in + ci) * kh + y) * kw + x] =
+                            w[((ci * c_out + co) * kh + (kh - 1 - y)) * kw + (kw - 1 - x)];
+                    }
+                }
+            }
+        }
+        let dims = vec![c_out as i64, c_in as i64, kh as i64, kw as i64];
+        initializers[weight].set_floats(dims, &flipped);
+        let conv_pads: Vec<i64> = pads
+            .iter()
+            .zip(kernel)
+            .map(|(&pad, k)| k - 1 - pad)
+            .collect();
+        return Ok(Some(vec![Node::new(
+            &name,
+            "Conv",
+            node.inputs.clone(),
+            node.outputs.clone(),
+            &[
+                ints_attribute("kernel_shape", &[kh as i64, kw as i64]),
+                ints_attribute("pads", &conv_pads),
+                ints_attribute("strides", &[1, 1]),
+            ],
+        )]));
     }
-    let kernel = [kh as i64, kw as i64, kh as i64, kw as i64];
-    if pads
-        .iter()
-        .zip(kernel)
-        .any(|(&pad, k)| pad < 0 || pad > k - 1)
+
+    let block = kh;
+    if !depth_to_space
+        || kh != kw
+        || strides != [kh as i64, kw as i64]
+        || pads.iter().any(|&pad| pad != 0)
     {
         return Ok(None);
     }
-    let w = initializers[weight].floats()?;
-    let name = node.name()?;
-    let mut flipped = vec![0.0f32; w.len()];
+    let bias = match node.inputs.get(2).filter(|name| !name.is_empty()) {
+        Some(name) => match single_use(name) {
+            Some(bias) if initializers[bias].data_type == FLOAT => Some(bias),
+            _ => return Ok(None),
+        },
+        None => None,
+    };
+    let mut pointwise = vec![0.0f32; w.len()];
     for ci in 0..c_in {
         for co in 0..c_out {
-            for y in 0..kh {
-                for x in 0..kw {
-                    flipped[((co * c_in + ci) * kh + y) * kw + x] =
-                        w[((ci * c_out + co) * kh + (kh - 1 - y)) * kw + (kw - 1 - x)];
+            for y in 0..block {
+                for x in 0..block {
+                    pointwise[((co * block + y) * block + x) * c_in + ci] =
+                        w[((ci * c_out + co) * block + y) * block + x];
                 }
             }
         }
     }
-    let dims = vec![c_out as i64, c_in as i64, kh as i64, kw as i64];
-    initializers[weight].set_floats(dims, &flipped);
-    let conv_pads: Vec<i64> = pads
-        .iter()
-        .zip(kernel)
-        .map(|(&pad, k)| k - 1 - pad)
-        .collect();
-    Ok(Some(vec![Node::new(
-        &name,
-        "Conv",
-        node.inputs.clone(),
-        node.outputs.clone(),
-        &[
-            ints_attribute("kernel_shape", &[kh as i64, kw as i64]),
-            ints_attribute("pads", &conv_pads),
-            ints_attribute("strides", &[1, 1]),
-        ],
-    )]))
+    let channels = (c_out * block * block) as i64;
+    initializers[weight].set_floats(vec![channels, c_in as i64, 1, 1], &pointwise);
+    if let Some(bias) = bias {
+        let repeated: Vec<f32> = initializers[bias]
+            .floats()?
+            .into_iter()
+            .flat_map(|value| std::iter::repeat_n(value, block * block))
+            .collect();
+        initializers[bias].set_floats(vec![channels], &repeated);
+    }
+    let spread = format!("{}_before_depth_to_space", node.outputs[0]);
+    Ok(Some(vec![
+        Node::new(
+            &name,
+            "Conv",
+            node.inputs.clone(),
+            vec![spread.clone()],
+            &[ints_attribute("kernel_shape", &[1, 1])],
+        ),
+        Node::new(
+            &format!("{}_depth_to_space", name),
+            "DepthToSpace",
+            vec![spread],
+            node.outputs.clone(),
+            &[
+                int_attribute("blocksize", block as i64),
+                string_attribute("mode", "CRD"),
+            ],
+        ),
+    ]))
 }
 
-fn rewrite(model: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+fn rewrite(model: &[u8], depth_to_space: bool) -> Result<Option<(Vec<u8>, usize)>> {
     let model_fields = fields(model)?;
     let graph_bytes = bytes_fields(&model_fields, MODEL_GRAPH)
         .next()
@@ -509,7 +605,7 @@ fn rewrite(model: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
     let mut converted = 0;
     for node in &parsed {
         let replacement = if node.op_type == "ConvTranspose" {
-            conv_transpose_as_conv(node, &mut initializers, &index, &uses)?
+            conv_transpose_as_conv(node, &mut initializers, &index, &uses, depth_to_space)?
         } else {
             None
         };
@@ -563,12 +659,14 @@ fn rewrite(model: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
 }
 
 pub fn optimized_model(model_path: &Path, use_gpu: bool) -> Option<Vec<u8>> {
-    if use_gpu || !cfg!(target_arch = "x86_64") {
-        return None;
-    }
+    let depth_to_space = match use_gpu {
+        false if cfg!(target_arch = "x86_64") => false,
+        true if cfg!(target_os = "linux") => true,
+        _ => return None,
+    };
     match fs::read(model_path)
         .map_err(anyhow::Error::from)
-        .and_then(|model| rewrite(&model))
+        .and_then(|model| rewrite(&model, depth_to_space))
     {
         Ok(Some((model, converted))) => {
             log::info!(

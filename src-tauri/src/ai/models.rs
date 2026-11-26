@@ -3,7 +3,7 @@ use crate::masks::face::FaceAnalysis;
 use anyhow::Result;
 use ndarray::{Array, IxDyn};
 use ort::editor::{Graph, Model, Node, ONNX_DOMAIN, Opset, Outlet};
-use ort::execution_providers::{CPUExecutionProvider, ExecutionProviderDispatch};
+use ort::execution_providers::CPUExecutionProvider;
 use ort::memory::Allocator;
 use ort::session::{Output, Session};
 use ort::tensor::{Shape, SymbolicDimensions, TensorElementType};
@@ -371,7 +371,7 @@ impl AiModels {
     }
 
     fn gpu_inference(&self) -> bool {
-        self.use_gpu && gpu_allowed_on_platform() && gpu_execution_provider().is_some()
+        self.use_gpu && birefnet_gpu_allowed() && gpu_execution_provider().is_some()
     }
 
     pub fn birefnet(&self) -> Result<SharedSession> {
@@ -380,7 +380,7 @@ impl AiModels {
         } else {
             BIREFNET_FP32_FILENAME
         };
-        self.session(&self.birefnet, filename, gpu_allowed_on_platform())
+        self.session(&self.birefnet, filename, birefnet_gpu_allowed())
     }
 
     pub fn esam3_image_encoder(&self) -> Result<SharedSession> {
@@ -527,36 +527,52 @@ fn high_performance_dml_device_id() -> Option<i32> {
     }
 }
 
+enum GpuProvider {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    Builtin(ort::execution_providers::ExecutionProviderDispatch),
+    #[cfg(target_os = "linux")]
+    WebGpu,
+}
+
 #[cfg(target_os = "windows")]
-fn gpu_execution_provider() -> Option<ExecutionProviderDispatch> {
-    Some(
+fn gpu_execution_provider() -> Option<GpuProvider> {
+    Some(GpuProvider::Builtin(
         ort::execution_providers::DirectMLExecutionProvider::default()
             .with_device_id(high_performance_dml_device_id().unwrap_or(0))
             .build()
             .error_on_failure(),
-    )
+    ))
 }
 
 #[cfg(target_os = "macos")]
-fn gpu_execution_provider() -> Option<ExecutionProviderDispatch> {
+fn gpu_execution_provider() -> Option<GpuProvider> {
     use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLModelFormat};
 
-    Some(
+    Some(GpuProvider::Builtin(
         ort::execution_providers::CoreMLExecutionProvider::default()
             .with_model_format(CoreMLModelFormat::MLProgram)
             .with_compute_units(CoreMLComputeUnits::All)
             .build()
             .error_on_failure(),
-    )
+    ))
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn gpu_execution_provider() -> Option<ExecutionProviderDispatch> {
+#[cfg(target_os = "linux")]
+fn gpu_execution_provider() -> Option<GpuProvider> {
+    crate::ai::webgpu::available().then_some(GpuProvider::WebGpu)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn gpu_execution_provider() -> Option<GpuProvider> {
     None
 }
 
 fn gpu_allowed_on_platform() -> bool {
     !cfg!(target_os = "macos")
+}
+
+fn birefnet_gpu_allowed() -> bool {
+    gpu_allowed_on_platform() && !cfg!(target_os = "linux")
 }
 
 type GpuModelPatch = fn() -> ort::Result<(Model, Vec<Output>)>;
@@ -570,7 +586,7 @@ fn i64_initializer(values: &[i64]) -> ort::Result<Tensor<i64>> {
 fn create_session(
     model_path: &Path,
     kind: SessionKind,
-    gpu_provider: Option<ExecutionProviderDispatch>,
+    gpu_provider: Option<GpuProvider>,
     gpu_patch: Option<GpuModelPatch>,
     fixed_dims: &[(&str, i64)],
 ) -> Result<Session> {
@@ -579,9 +595,18 @@ fn create_session(
     let cpu_provider = CPUExecutionProvider::default()
         .with_arena_allocator(kind == SessionKind::Persistent)
         .build();
-    let providers: Vec<_> = gpu_provider.into_iter().chain([cpu_provider]).collect();
 
     let mut builder = Session::builder()?;
+    let providers: Vec<_> = match gpu_provider {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        Some(GpuProvider::Builtin(gpu_provider)) => vec![gpu_provider, cpu_provider],
+        #[cfg(target_os = "linux")]
+        Some(GpuProvider::WebGpu) => {
+            crate::ai::webgpu::append_to(&mut builder).map_err(|e| anyhow::anyhow!(e))?;
+            vec![cpu_provider]
+        }
+        None => vec![cpu_provider],
+    };
     if use_gpu || kind == SessionKind::OneShot {
         builder = builder.with_memory_pattern(false)?;
     }
