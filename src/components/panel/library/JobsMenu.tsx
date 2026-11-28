@@ -13,6 +13,7 @@ import {
   Clapperboard,
   CloudUpload,
   Copy,
+  Cpu,
   Crosshair,
   Download,
   FileOutput,
@@ -38,6 +39,7 @@ import {
 } from 'lucide-react';
 import { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { useElapsedSeconds } from '../../../hooks/useElapsedSeconds';
 import { toast } from 'react-toastify';
 import { invoke } from '@tauri-apps/api/core';
 import Button from '../../ui/Button';
@@ -87,6 +89,7 @@ const JOB_ICONS: Record<JobKind, LucideIcon> = {
   [JobKind.Export]: FileOutput,
   [JobKind.ImmichDownload]: Download,
   [JobKind.Import]: FolderInput,
+  [JobKind.MigraphxCompile]: Cpu,
   [JobKind.ModelDownload]: Download,
   [JobKind.Move]: FolderSymlink,
 };
@@ -319,9 +322,15 @@ const jobCancel = (job: Job, t: TFunction) => {
   return null;
 };
 
+function ElapsedCount({ since }: { since: number }) {
+  const { t } = useTranslation();
+  return <Count>{t('library.jobs.elapsed', { seconds: useElapsedSeconds(since) })}</Count>;
+}
+
 function jobTrailing(job: Job, t: TFunction, language: string) {
   switch (job.status) {
     case JobStatus.Running: {
+      if (job.kind === JobKind.MigraphxCompile) return <ElapsedCount since={job.startedAt} />;
       const count = hasStepProgress(job.progress) ? <Count>{formatJobProgress(job, t, language)}</Count> : null;
       const cancel = jobCancel(job, t);
       if (cancel) {

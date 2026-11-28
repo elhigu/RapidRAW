@@ -40,6 +40,7 @@ export enum JobKind {
   Export = 'export',
   ImmichDownload = 'immichDownload',
   Import = 'import',
+  MigraphxCompile = 'migraphxCompile',
   ModelDownload = 'modelDownload',
   Move = 'move',
 }
@@ -71,7 +72,7 @@ export interface Job {
   transfer?: TransferRate;
 }
 
-export type JobUpdate = Partial<Pick<Job, 'status' | 'progress' | 'detail' | 'error' | 'skipped'>>;
+export type JobUpdate = Partial<Pick<Job, 'status' | 'progress' | 'detail' | 'error' | 'skipped' | 'startedAt'>>;
 
 export const isJobActive = (status: JobStatus) => status === JobStatus.Running || status === JobStatus.Cancelling;
 
@@ -96,6 +97,9 @@ const findActiveJob = (jobs: Record<string, Job>, kind: JobKind) =>
   Object.values(jobs).find((job) => job.kind === kind && isJobActive(job.status));
 
 export const selectAiTaggingJob = (state: ProcessState) => findActiveJob(state.jobs, JobKind.AiTagging) ?? null;
+
+export const selectMigraphxCompileStart = (state: ProcessState) =>
+  findActiveJob(state.jobs, JobKind.MigraphxCompile)?.startedAt ?? null;
 
 export const selectAiModelDownloadStatus = (state: ProcessState) => {
   const job = findActiveJob(state.jobs, JobKind.ModelDownload);

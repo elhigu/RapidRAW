@@ -112,6 +112,8 @@ const CLIP_MODEL_SHA256: &str = "57879bb1c23cdeb350d23569dd251ed4b740a96d747c529
 const DENOISE_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/nind_denoise_utnet_684.onnx?download=true";
 
 const DENOISE_FILENAME: &str = "nind_denoise_utnet_684.onnx";
+/// Kept in f32 in half precision: the GPU tile patch reads it.
+const DENOISE_HALF_PRECISION_EXCEPT: &[&str] = &["conv2d_9"];
 
 const DENOISE_SHA256: &str = "ee3586279d514df557ff3f7dec6df37fafc51ba5d3a3435b2cc9ac2d9017e7fe";
 
@@ -640,6 +642,259 @@ fn add_gpu_provider(builder: SessionBuilder) -> ort::Result<SessionBuilder> {
     Ok(builder)
 }
 
+// AI denoise on AMD GPUs through MIGraphX (ROCm), with AMD's onnxruntime-ep-migraphx plugin.
+// Other models keep using WebGPU.
+#[cfg(target_os = "linux")]
+const MIGRAPHX_EP: &str = "MIGraphXExecutionProvider";
+
+#[cfg(target_os = "linux")]
+const MIGRAPHX_PLUGIN: &str = "onnxruntime_ep_migraphx/libmigraphx-ep.so";
+
+/// The plugin from `RAPIDRAW_MIGRAPHX_EP`, a `pip install --target` into the app data folder's
+/// `migraphx` folder, or a user or system wide `pip install`.
+#[cfg(target_os = "linux")]
+pub fn migraphx_plugin_path(app_handle: &tauri::AppHandle) -> Option<&'static Path> {
+    static PLUGIN: OnceCell<Option<PathBuf>> = OnceCell::new();
+    PLUGIN
+        .get_or_init(|| {
+            if let Some(path) = std::env::var_os("RAPIDRAW_MIGRAPHX_EP") {
+                return Some(PathBuf::from(path));
+            }
+            let mut folders: Vec<PathBuf> = app_handle
+                .path()
+                .app_data_dir()
+                .map(|dir| dir.join("migraphx"))
+                .into_iter()
+                .collect();
+            let lib_dirs = std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".local/lib"))
+                .into_iter()
+                .chain(["/usr/local/lib", "/usr/lib", "/usr/lib64"].map(PathBuf::from));
+            for lib_dir in lib_dirs {
+                let Ok(entries) = fs::read_dir(&lib_dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if entry.file_name().to_string_lossy().starts_with("python3") {
+                        folders.push(entry.path().join("site-packages"));
+                        folders.push(entry.path().join("dist-packages"));
+                    }
+                }
+            }
+            folders
+                .into_iter()
+                .map(|folder| folder.join(MIGRAPHX_PLUGIN))
+                .find(|path| path.is_file())
+        })
+        .as_deref()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn migraphx_plugin_path(_app_handle: &tauri::AppHandle) -> Option<&'static Path> {
+    None
+}
+
+#[tauri::command]
+pub fn get_migraphx_plugin_path(app_handle: tauri::AppHandle) -> Option<String> {
+    migraphx_plugin_path(&app_handle).map(|path| path.display().to_string())
+}
+
+/// MIGraphX reads its settings from the environment, so they are set at startup, before any
+/// thread loads it. Values already in the environment are kept.
+#[cfg(target_os = "linux")]
+pub fn configure_migraphx(app_handle: &tauri::AppHandle) {
+    if migraphx_plugin_path(app_handle).is_none() {
+        return;
+    }
+    let Ok(cache) = app_handle
+        .path()
+        .app_cache_dir()
+        .map(|dir| dir.join("migraphx"))
+    else {
+        return;
+    };
+    let _ = fs::create_dir_all(cache.join("models"));
+    let settings: [(&str, std::ffi::OsString); 8] = [
+        // MIOpen's convolutions run the denoise model faster than MLIR's and compile much faster.
+        ("MIGRAPHX_DISABLE_MLIR", "1".into()),
+        // Otherwise MIOpen benchmarks its slow reference convolution on every compile.
+        ("MIOPEN_DEBUG_CONV_DIRECT_NAIVE_CONV_FWD", "0".into()),
+        ("ORT_MIGRAPHX_PRECOMPILE_AT_LOAD", "1".into()),
+        ("ORT_MIGRAPHX_CACHE_DIR", cache.join("models").into()),
+        (
+            "MIGRAPHX_PROBLEM_CACHE",
+            cache.join("problem_cache.json").into(),
+        ),
+        // The compiled models are cached already; the kernel cache would add about 550 MB.
+        ("AMD_COMGR_CACHE", "0".into()),
+        ("MIOPEN_USER_DB_PATH", cache.join("miopen").into()),
+        ("MIOPEN_CUSTOM_CACHE_DIR", cache.join("miopen").into()),
+    ];
+    for (name, value) in settings {
+        if std::env::var_os(name).is_none() {
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn register_migraphx(app_handle: &tauri::AppHandle) -> bool {
+    static REGISTERED: OnceCell<bool> = OnceCell::new();
+    *REGISTERED.get_or_init(|| {
+        let (Some(path), Ok(environment)) = (migraphx_plugin_path(app_handle), environment())
+        else {
+            return false;
+        };
+        match environment.register_ep_library(MIGRAPHX_EP, path) {
+            Ok(()) => {
+                log::info!("AI denoise can use MIGraphX through {}", path.display());
+                true
+            }
+            Err(e) => {
+                log::warn!("MIGraphX for AI denoise is unavailable: {}", e);
+                let _ = app_handle.emit("migraphx-unavailable", e.to_string());
+                false
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn migraphx_device() -> Option<ort::device::Device<'static>> {
+    environment()
+        .ok()?
+        .devices()
+        .find(|device| device.ep().is_ok_and(|ep| ep == MIGRAPHX_EP))
+}
+
+#[cfg(target_os = "linux")]
+fn add_migraphx_provider(builder: SessionBuilder) -> ort::Result<SessionBuilder> {
+    let device = migraphx_device().ok_or_else(|| ort::Error::new("No MIGraphX device"))?;
+    Ok(builder.with_devices([device], None)?)
+}
+
+/// Compiling a model for MIGraphX can take a minute, so the user is told about loads that take
+/// longer than this. A compiled model from the cache loads in about a second.
+#[cfg(target_os = "linux")]
+const MIGRAPHX_NOTIFY_AFTER: Duration = Duration::from_secs(3);
+
+#[cfg(target_os = "linux")]
+fn migraphx_session(
+    app_handle: &tauri::AppHandle,
+    model_path: &Path,
+    patch: Option<ModelPatch>,
+    half_precision_except: Option<&[&str]>,
+) -> Option<Session> {
+    static LOADING: Mutex<()> = Mutex::new(());
+    let enabled = crate::app::settings::load_settings(app_handle.clone())
+        .is_ok_and(|settings| settings.ai_migraphx.unwrap_or(false));
+    if !enabled || !register_migraphx(app_handle) {
+        return None;
+    }
+    if migraphx_device().is_none() {
+        log::warn!("MIGraphX found no graphics card for AI denoise");
+        let _ = app_handle.emit("migraphx-unavailable", "No supported graphics card");
+        return None;
+    }
+    // A load waits for one that is already compiling the model, and then reads it from the cache.
+    let _loading = LOADING.lock().unwrap_or_else(|e| e.into_inner());
+    let start = Instant::now();
+    let result = std::thread::scope(|scope| {
+        let (done, finished) = std::sync::mpsc::channel();
+        let load = scope.spawn(move || {
+            let session = create_session_with(
+                model_path,
+                SessionKind::Persistent,
+                Some(add_migraphx_provider as AddProvider),
+                patch,
+                &[],
+                half_precision_except,
+            );
+            let _ = done.send(());
+            session
+        });
+        let compiling = finished.recv_timeout(MIGRAPHX_NOTIFY_AFTER).is_err();
+        if compiling {
+            let _ = app_handle.emit("migraphx-compile-start", start.elapsed().as_millis() as u64);
+        }
+        let session = load
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        if compiling {
+            let error = session.as_ref().err().map(|e| e.to_string());
+            let _ = app_handle.emit("migraphx-compile-finish", error);
+        }
+        session
+    });
+    match result {
+        Ok(session) => {
+            log::info!(
+                "Loaded {} on MIGraphX in {:.1?}",
+                model_path.display(),
+                start.elapsed()
+            );
+            let _ = GPU_STATUS.compare_exchange(
+                GPU_IDLE,
+                GPU_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            Some(session)
+        }
+        Err(e) => {
+            log::warn!(
+                "MIGraphX failed for {}, using the default provider: {}",
+                model_path.display(),
+                e
+            );
+            let _ = app_handle.emit("migraphx-unavailable", e.to_string());
+            None
+        }
+    }
+}
+
+/// Compiles the denoise model for MIGraphX in the background, so that the first denoise doesn't
+/// wait for it. The session is dropped: the compiled model stays in MIGraphX's cache.
+#[cfg(target_os = "linux")]
+pub fn prepare_migraphx(app_handle: &tauri::AppHandle, delay: Duration) {
+    let app_handle = app_handle.clone();
+    let _ = std::thread::Builder::new()
+        .name("migraphx-prepare".into())
+        .spawn(move || {
+            // Compiling keeps all cores busy; the threads MIGraphX starts inherit this priority.
+            unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+            std::thread::sleep(delay);
+            let Ok(model_path) = get_models_dir(&app_handle).map(|dir| dir.join(DENOISE_FILENAME))
+            else {
+                return;
+            };
+            if !gpu_acceleration_enabled(&app_handle) || !model_path.is_file() {
+                return;
+            }
+            let half_precision_except =
+                gpu_half_precision_enabled(&app_handle).then_some(DENOISE_HALF_PRECISION_EXCEPT);
+            drop(migraphx_session(
+                &app_handle,
+                &model_path,
+                Some(denoise_crop_as_slice),
+                half_precision_except,
+            ));
+        });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_migraphx(_app_handle: &tauri::AppHandle, _delay: Duration) {}
+
+#[cfg(not(target_os = "linux"))]
+fn migraphx_session(
+    _app_handle: &tauri::AppHandle,
+    _model_path: &Path,
+    _patch: Option<ModelPatch>,
+    _half_precision_except: Option<&[&str]>,
+) -> Option<Session> {
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn gpu_provider_available() -> bool {
     webgpu_device().is_some()
@@ -666,6 +921,8 @@ fn i64_initializer(values: &[i64]) -> ort::Result<Tensor<i64>> {
     Ok(tensor)
 }
 
+type AddProvider = fn(SessionBuilder) -> ort::Result<SessionBuilder>;
+
 fn create_session(
     model_path: &Path,
     kind: SessionKind,
@@ -674,6 +931,26 @@ fn create_session(
     fixed_dims: &[(&str, i64)],
     half_precision_except: Option<&[&str]>,
 ) -> ort::Result<Session> {
+    let gpu = use_gpu.then_some(add_gpu_provider as AddProvider);
+    create_session_with(
+        model_path,
+        kind,
+        gpu,
+        patch,
+        fixed_dims,
+        half_precision_except,
+    )
+}
+
+fn create_session_with(
+    model_path: &Path,
+    kind: SessionKind,
+    gpu: Option<AddProvider>,
+    patch: Option<ModelPatch>,
+    fixed_dims: &[(&str, i64)],
+    half_precision_except: Option<&[&str]>,
+) -> ort::Result<Session> {
+    let use_gpu = gpu.is_some();
     let model =
         crate::ai::onnx_rewrite::optimized_model(model_path, use_gpu, half_precision_except);
     let mut builder = session_builder()?;
@@ -686,8 +963,8 @@ fn create_session(
     for &(name, size) in fixed_dims {
         builder = builder.with_dimension_override(name, size)?;
     }
-    if use_gpu {
-        builder = add_gpu_provider(builder)?;
+    if let Some(add_provider) = gpu {
+        builder = add_provider(builder)?;
     }
     let cpu = CPU::default()
         .with_arena_allocator(kind == SessionKind::Persistent)
@@ -1083,14 +1360,30 @@ pub async fn get_or_init_denoise_model(
     download_and_verify_model(app_handle, &models_dir, &DENOISE_ASSET).await?;
 
     let model_path = models_dir.join(DENOISE_FILENAME);
-    let session = build_session_with_dims(
-        &model_path,
-        SessionKind::Persistent,
-        gpu_acceleration_enabled(app_handle),
-        Some(denoise_crop_as_slice),
-        &[],
-        gpu_half_precision_enabled(app_handle).then_some(&["conv2d_9"]),
-    )?;
+    let use_gpu = gpu_acceleration_enabled(app_handle);
+    let half_precision_except =
+        gpu_half_precision_enabled(app_handle).then_some(DENOISE_HALF_PRECISION_EXCEPT);
+    let migraphx = use_gpu
+        .then(|| {
+            migraphx_session(
+                app_handle,
+                &model_path,
+                Some(denoise_crop_as_slice),
+                half_precision_except,
+            )
+        })
+        .flatten();
+    let session = match migraphx {
+        Some(session) => session,
+        None => build_session_with_dims(
+            &model_path,
+            SessionKind::Persistent,
+            use_gpu,
+            Some(denoise_crop_as_slice),
+            &[],
+            half_precision_except,
+        )?,
+    };
     let denoise_model = Arc::new(Mutex::new(session));
 
     ai_state_mutex

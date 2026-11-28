@@ -339,6 +339,15 @@ pub fn run() {
                     std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
                     cli_println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
                 }
+
+                #[cfg(target_os = "linux")]
+                {
+                    crate::ai::models::configure_migraphx(&app_handle);
+                    crate::ai::models::prepare_migraphx(
+                        &app_handle,
+                        std::time::Duration::from_secs(10),
+                    );
+                }
             }
 
             setup_logging(&app_handle);
@@ -639,6 +648,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             render::gpu::fallback::get_gpu_fallbacks,
             render::gpu::fallback::reset_gpu_fallback,
+            ai::models::get_migraphx_plugin_path,
             render::commands::apply_adjustments,
             render::commands::subscribe_analytics,
             render::commands::generate_preview_for_path,

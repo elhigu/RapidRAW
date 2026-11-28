@@ -17,7 +17,8 @@ import {
 import { AppSettings } from '../../types/settings';
 import AdjustmentSubSection from './AdjustmentSubSection';
 import { canvasToolState, useEditorStore } from '../../store/useEditorStore';
-import { selectAiModelDownloadStatus, useProcessStore } from '../../store/useProcessStore';
+import { selectAiModelDownloadStatus, selectMigraphxCompileStart, useProcessStore } from '../../store/useProcessStore';
+import { useElapsedSeconds } from '../../hooks/useElapsedSeconds';
 import { useVideoKind } from '../../store/videoIntegration';
 
 interface DetailsPanelProps {
@@ -44,6 +45,7 @@ function DetailsPanel({
     state.selectedImage ? state.aiUpscaleProgress[state.selectedImage.path] : undefined,
   );
   const aiModelDownloadStatus = useProcessStore(selectAiModelDownloadStatus);
+  const migraphxCompileSeconds = useElapsedSeconds(useProcessStore(selectMigraphxCompileStart));
   const isVideo = useVideoKind() !== 'none';
 
   const handleAdjustmentChange = (key: string, value: string) => {
@@ -207,11 +209,16 @@ function DetailsPanel({
                       <Text variant={TextVariants.label}>
                         {aiModelDownloadStatus
                           ? t('editor.masks.settings.aiModelDownloading')
-                          : t('editor.ai.denoising')}
+                          : migraphxCompileSeconds !== null
+                            ? t('library.jobs.kinds.migraphxCompile')
+                            : t('editor.ai.denoising')}
                       </Text>
                     </div>
                     <Text variant={TextVariants.small} className="text-accent">
-                      {aiModelDownloadStatus || `${Math.round(aiDenoiseProgress * 100)}%`}
+                      {aiModelDownloadStatus ||
+                        (migraphxCompileSeconds !== null
+                          ? t('library.jobs.elapsed', { seconds: migraphxCompileSeconds })
+                          : `${Math.round(aiDenoiseProgress * 100)}%`)}
                     </Text>
                   </div>
                 ) : (

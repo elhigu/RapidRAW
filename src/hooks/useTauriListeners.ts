@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
+import i18n from 'i18next';
 import { Status } from '../types/export';
 import { Invokes } from '../types/invokes';
 import { Progress } from '../types/library';
@@ -127,6 +128,7 @@ export function useTauriListeners({
     let isEffectActive = true;
     let aiTaggingJobId: string | null = null;
     const modelDownloadJobIds: Record<string, string> = {};
+    let migraphxCompileJobId: string | null = null;
 
     const refreshIfInside = (target: string | null) => {
       const currentPath = useLibraryStore.getState().currentFolderPath;
@@ -308,6 +310,25 @@ export function useTauriListeners({
           modelDownloadJobIds[event.payload] = useProcessStore
             .getState()
             .startJob(JobKind.ModelDownload, { detail: event.payload });
+      }),
+      listen<number>('migraphx-compile-start', (event) => {
+        if (!isEffectActive) return;
+        migraphxCompileJobId = useProcessStore
+          .getState()
+          .startJob(JobKind.MigraphxCompile, { startedAt: Date.now() - event.payload });
+        toast.info(i18n.t('library.jobs.migraphxCompiling'));
+      }),
+      listen<string | null>('migraphx-compile-finish', (event) => {
+        if (!isEffectActive || !migraphxCompileJobId) return;
+        const error = event.payload;
+        useProcessStore
+          .getState()
+          .updateJob(migraphxCompileJobId, error ? { status: JobStatus.Error, error } : { status: JobStatus.Success });
+        migraphxCompileJobId = null;
+        if (!error) toast.success(i18n.t('library.jobs.migraphxReady'));
+      }),
+      listen<string>('migraphx-unavailable', (event) => {
+        if (isEffectActive) toast.error(i18n.t('library.jobs.migraphxFailed', { error: event.payload }));
       }),
       listen<{ name: string; current: number; total: number }>('ai-model-download-progress', (event) => {
         const { name, current, total } = event.payload;

@@ -644,6 +644,13 @@ export default function SettingsPanel({
       .then(setIsWgpuSupported)
       .catch(() => setIsWgpuSupported(false));
   }, []);
+  const [migraphxPlugin, setMigraphxPlugin] = useState<string | null>(null);
+  useEffect(() => {
+    if (osPlatform !== 'linux') return;
+    invoke<string | null>(Invokes.GetMigraphxPluginPath)
+      .then(setMigraphxPlugin)
+      .catch(() => setMigraphxPlugin(null));
+  }, [osPlatform]);
   const displayStatus = useDisplayStatus(DISPLAY_STATUS_INTERVAL);
   const [gpuFallbacks, setGpuFallbacks] = useState<GpuFallbacks | null>(null);
   const refreshGpuFallbacks = useCallback(() => {
@@ -1361,6 +1368,23 @@ export default function SettingsPanel({
                                     />
                                   </SettingItem>
                                 )}
+                                {osPlatform === 'linux' &&
+                                  (appSettings?.aiGpuAcceleration ?? true) &&
+                                  migraphxPlugin && (
+                                    <SettingItem
+                                      inline
+                                      label={t('settings.processing.ai.cpu.migraphx')}
+                                      tooltip={t('settings.processing.ai.cpu.migraphxDesc', { path: migraphxPlugin })}
+                                    >
+                                      <Switch
+                                        checked={appSettings?.aiMigraphx ?? false}
+                                        id="ai-migraphx-toggle"
+                                        onChange={(checked) =>
+                                          onSettingsChange({ ...appSettings, aiMigraphx: checked })
+                                        }
+                                      />
+                                    </SettingItem>
+                                  )}
                               </div>
                             )}
                           </motion.div>

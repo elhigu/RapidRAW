@@ -690,6 +690,8 @@ pub struct AppSettings {
     pub ai_gpu_acceleration: bool,
     #[serde(default)]
     pub ai_half_precision: Option<bool>,
+    #[serde(default)]
+    pub ai_migraphx: Option<bool>,
     #[serde(default = "default_open_tree_sections")]
     pub open_tree_sections: Vec<String>,
     #[serde(default)]
@@ -947,6 +949,7 @@ impl Default for AppSettings {
             ai_provider: Some("cpu".to_string()),
             ai_gpu_acceleration: default_ai_gpu_acceleration(),
             ai_half_precision: None,
+            ai_migraphx: None,
             open_tree_sections: default_open_tree_sections(),
             copy_paste_settings: CopyPasteSettings::default(),
             raw_highlight_compression: Some(2.5),
@@ -1314,9 +1317,13 @@ pub fn set_ui_scale(scale: f64, app_handle: AppHandle) {
 #[tauri::command]
 pub fn save_settings(mut settings: AppSettings, app_handle: AppHandle) -> Result<(), String> {
     let previous = load_settings(app_handle.clone()).ok();
-    let previous_gpu_acceleration = previous
-        .as_ref()
-        .map(|previous| (previous.ai_gpu_acceleration, previous.ai_half_precision));
+    let previous_gpu_acceleration = previous.as_ref().map(|previous| {
+        (
+            previous.ai_gpu_acceleration,
+            previous.ai_half_precision,
+            previous.ai_migraphx,
+        )
+    });
     if !wgpu_renderer_available()
         && let Some(stored) = settings_cache().as_ref()
     {
@@ -1339,9 +1346,15 @@ pub fn save_settings(mut settings: AppSettings, app_handle: AppHandle) -> Result
         .set_capacity(cache_size);
     crate::app::storage::apply_cache_limits(&settings);
 
-    if previous_gpu_acceleration != Some((settings.ai_gpu_acceleration, settings.ai_half_precision))
+    if previous_gpu_acceleration
+        != Some((
+            settings.ai_gpu_acceleration,
+            settings.ai_half_precision,
+            settings.ai_migraphx,
+        ))
     {
         crate::ai::models::reset_ai_sessions(&state.ai_state);
+        crate::ai::models::prepare_migraphx(&app_handle, std::time::Duration::ZERO);
     }
     crate::adjustments::develop_defaults::refresh(&app_handle);
     Ok(())

@@ -44,6 +44,7 @@ import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
 import { JobsMenu } from './library/JobsMenu';
+import MigraphxCompileStatus from '../ui/MigraphxCompileStatus';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 
 interface MainLibraryProps {
@@ -609,6 +610,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                   flagStatusOptions={translatedFlagStatusOptions}
                   sortOptions={translatedSortOptions}
                 />
+                <MigraphxCompileStatus />
                 <JobsMenu onNavigateToFolder={props.onNavigateToFolder} />
                 {props.isAndroid && (
                   <Button

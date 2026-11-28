@@ -21,6 +21,7 @@ import { IconAperture, IconCalendar, IconClock, IconFocalLength, IconIso, IconSh
 import Text from '../../ui/Text';
 import ViewerZoom from '../ViewerZoom';
 import { JobsMenu } from '../library/JobsMenu';
+import MigraphxCompileStatus from '../../ui/MigraphxCompileStatus';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
@@ -583,6 +584,7 @@ const EditorToolbar = memo(
         </div>
 
         <div className="flex items-center justify-end gap-2 shrink-0 z-40">
+          <MigraphxCompileStatus compact />
           {inVideo && <JobsMenu compact />}
           {inProject && !isAndroid && (
             <div className="h-9 px-3 rounded-full bg-surface flex items-center">

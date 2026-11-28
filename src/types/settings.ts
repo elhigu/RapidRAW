@@ -103,6 +103,7 @@ export interface AppSettings {
   aiConnectorAddress?: string;
   aiGpuAcceleration?: boolean;
   aiHalfPrecision?: boolean;
+  aiMigraphx?: boolean;
   aiProvider?: string;
   decorations?: any;
   editorPreviewResolution?: number;
